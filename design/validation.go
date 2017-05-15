@@ -2,10 +2,12 @@ package design
 
 import (
 	"fmt"
+	"go/build"
 	"mime"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -250,15 +252,20 @@ func (r *ResourceDefinition) validateParent(verr *dslengine.ValidationErrors) {
 // Validate makes sure the CORS definition origin is valid.
 func (cors *CORSDefinition) Validate() *dslengine.ValidationErrors {
 	verr := new(dslengine.ValidationErrors)
-	if strings.Count(cors.Origin, "*") > 1 {
+	if !cors.Regexp && strings.Count(cors.Origin, "*") > 1 {
 		verr.Add(cors, "invalid origin, can only contain one wildcard character")
+	}
+	if cors.Regexp {
+		_, err := regexp.Compile(cors.Origin)
+		if err != nil {
+			verr.Add(cors, "invalid origin, should be a valid regular expression")
+		}
 	}
 	return verr
 }
 
 // Validate validates the encoding MIME type and Go package path if set.
 func (enc *EncodingDefinition) Validate() *dslengine.ValidationErrors {
-	gopaths := filepath.SplitList(os.Getenv("GOPATH"))
 	verr := new(dslengine.ValidationErrors)
 	if len(enc.MIMETypes) == 0 {
 		verr.Add(enc, "missing MIME type")
@@ -271,16 +278,16 @@ func (enc *EncodingDefinition) Validate() *dslengine.ValidationErrors {
 		}
 	}
 	if len(enc.PackagePath) > 0 {
-		found := false
 		rel := filepath.FromSlash(enc.PackagePath)
-		for _, gopath := range gopaths {
-			if _, err := os.Stat(filepath.Join(gopath, "src", rel)); err == nil {
-				found = true
-				break
-			}
+		dir, err := os.Getwd()
+		if err != nil {
+			verr.Add(enc, "couldn't retrieve working directory %s", err)
+			return verr
 		}
-		if !found {
-			verr.Add(enc, "invalid Go package path %#v", enc.PackagePath)
+		_, err = build.Default.Import(rel, dir, build.FindOnly)
+		if err != nil {
+			verr.Add(enc, "invalid Go package path %#v: %s", enc.PackagePath, err)
+			return verr
 		}
 	} else {
 		for _, m := range enc.MIMETypes {
@@ -327,6 +334,19 @@ func (a *ActionDefinition) Validate() *dslengine.ValidationErrors {
 	}
 	if a.Parent == nil {
 		verr.Add(a, "missing parent resource")
+	}
+	if a.Params != nil {
+		for n, p := range a.Params.Type.ToObject() {
+			if p.Type.IsPrimitive() {
+				continue
+			}
+			if p.Type.IsArray() {
+				if p.Type.ToArray().ElemType.Type.IsPrimitive() {
+					continue
+				}
+			}
+			verr.Add(a, "Param %s has an invalid type, action params must be primitives or arrays of primitives", n)
+		}
 	}
 
 	return verr.AsError()

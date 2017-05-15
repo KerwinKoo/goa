@@ -8,7 +8,9 @@ import (
 	"regexp"
 	"strings"
 
-	"golang.org/x/net/context"
+	pErrors "github.com/pkg/errors"
+
+	"context"
 
 	"github.com/goadesign/goa"
 	"github.com/goadesign/goa/middleware"
@@ -27,16 +29,14 @@ type errorResponse struct {
 	// Detail describes the specific error occurrence.
 	Detail string `json:"detail" xml:"detail" form:"detail"`
 	// Meta contains additional key/value pairs useful to clients.
-	Meta []map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" form:"meta,omitempty"`
+	Meta map[string]interface{} `json:"meta,omitempty" xml:"meta,omitempty" form:"meta,omitempty"`
 }
 
 // Error returns the error occurrence details.
 func (e *errorResponse) Error() string {
 	msg := fmt.Sprintf("[%s] %d %s: %s", e.ID, e.Status, e.Code, e.Detail)
-	for _, val := range e.Meta {
-		for k, v := range val {
-			msg += ", " + fmt.Sprintf("%s: %v", k, v)
-		}
+	for k, v := range e.Meta {
+		msg += ", " + fmt.Sprintf("%s: %v", k, v)
 	}
 	return msg
 }
@@ -103,7 +103,6 @@ var _ = Describe("ErrorHandler", func() {
 				var origID string
 
 				BeforeEach(func() {
-					verbose = false
 					h = func(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
 						e := goa.ErrInternal("goa-500-boom")
 						origID = e.(goa.ServiceError).Token()
@@ -119,6 +118,25 @@ var _ = Describe("ErrorHandler", func() {
 					err := service.Decoder.Decode(&decoded, bytes.NewBuffer(rw.Body), "application/json")
 					Ω(err).ShouldNot(HaveOccurred())
 					Ω(decoded.ID).Should(Equal(origID))
+				})
+			})
+
+			Context("and goa 504 error", func() {
+				BeforeEach(func() {
+					meaningful := goa.NewErrorClass("goa-504-with-info", http.StatusGatewayTimeout)
+					h = func(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+						return meaningful("gatekeeper says no")
+					}
+				})
+
+				It("passes the response", func() {
+					var decoded errorResponse
+					Ω(rw.Status).Should(Equal(http.StatusGatewayTimeout))
+					Ω(rw.ParentHeader["Content-Type"]).Should(Equal([]string{goa.ErrorMediaIdentifier}))
+					err := service.Decoder.Decode(&decoded, bytes.NewBuffer(rw.Body), "application/json")
+					Ω(err).ShouldNot(HaveOccurred())
+					Ω(decoded.Code).Should(Equal("goa-504-with-info"))
+					Ω(decoded.Detail).Should(Equal("gatekeeper says no"))
 				})
 			})
 		})
@@ -142,6 +160,38 @@ var _ = Describe("ErrorHandler", func() {
 			err := service.Decoder.Decode(&decoded, bytes.NewBuffer(rw.Body), "application/json")
 			Ω(err).ShouldNot(HaveOccurred())
 			Ω(decoded.Error()).Should(Equal(gerr.Error()))
+		})
+	})
+
+	Context("with a handler returning a pkg errors wrapped error", func() {
+		var wrappedError error
+		var logger *testLogger
+		verbose = true
+		BeforeEach(func() {
+			logger = new(testLogger)
+			service = newService(logger)
+			wrappedError = pErrors.Wrap(goa.ErrInternal("something crazy happened"), "an error")
+			h = func(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
+				return wrappedError
+			}
+		})
+
+		It("maps pkg errors to HTTP responses", func() {
+			var decoded errorResponse
+			cause := pErrors.Cause(wrappedError)
+			Ω(rw.Status).Should(Equal(cause.(goa.ServiceError).ResponseStatus()))
+			Ω(rw.ParentHeader["Content-Type"]).Should(Equal([]string{goa.ErrorMediaIdentifier}))
+			err := service.Decoder.Decode(&decoded, bytes.NewBuffer(rw.Body), "application/json")
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(decoded.Error()).Should(Equal(cause.Error()))
+		})
+		It("logs pkg errors stacktaces", func() {
+			var decoded errorResponse
+			err := service.Decoder.Decode(&decoded, bytes.NewBuffer(rw.Body), "application/json")
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(logger.ErrorEntries).Should(HaveLen(1))
+			data := logger.ErrorEntries[0].Data[1]
+			Ω(data).Should(ContainSubstring("error_handler_test.go"))
 		})
 	})
 })

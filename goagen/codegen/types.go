@@ -65,6 +65,11 @@ func init() {
 //   pointers for a private struct.
 func GoTypeDef(ds design.DataStructure, tabs int, jsonTags, private bool) string {
 	def := ds.Definition()
+	if tname, ok := def.Metadata["struct:field:type"]; ok {
+		if len(tname) > 0 {
+			return tname[0]
+		}
+	}
 	t := def.Type
 	switch actual := t.(type) {
 	case design.Primitive:
@@ -208,8 +213,8 @@ func GoTypeName(t design.DataType, required []string, tabs int, private bool) st
 	case *design.UserTypeDefinition:
 		return Goify(actual.TypeName, !private)
 	case *design.MediaTypeDefinition:
-		if builtin := BuiltInTypeName(actual); builtin != "" {
-			return builtin
+		if actual.IsError() {
+			return "error"
 		}
 		return Goify(actual.TypeName, !private)
 	default:
@@ -268,25 +273,24 @@ func GoTypeDesc(t design.DataType, upper bool) string {
 		if actual.Description != "" {
 			return strings.Replace(actual.Description, "\n", "\n// ", -1)
 		}
+		name := Goify(actual.TypeName, upper)
+		if actual.View != "default" {
+			name += Goify(actual.View, true)
+		}
 
 		switch elem := actual.UserTypeDefinition.AttributeDefinition.Type.(type) {
 		case *design.Array:
-			return fmt.Sprintf("%s media type is a collection of %s.", Goify(actual.TypeName, upper), GoTypeName(elem.ElemType.Type, nil, 0, !upper))
+			elemName := GoTypeName(elem.ElemType.Type, nil, 0, !upper)
+			if actual.View != "default" {
+				elemName += Goify(actual.View, true)
+			}
+			return fmt.Sprintf("%s media type is a collection of %s.", name, elemName)
 		default:
-			return Goify(actual.TypeName, upper) + " media type."
+			return name + " media type."
 		}
 	default:
 		return ""
 	}
-}
-
-// BuiltInTypeName returns the name of the goa struct corresponding to the media type definition
-// or the empty string if there isn't one.
-func BuiltInTypeName(mt *design.MediaTypeDefinition) string {
-	if mt.Identifier == design.ErrorMedia.Identifier {
-		return "error"
-	}
-	return ""
 }
 
 var commonInitialisms = map[string]bool{
@@ -480,6 +484,7 @@ var Reserved = map[string]bool{
 	"http": true,
 	"json": true,
 	"os":   true,
+	"url":  true,
 	"time": true,
 }
 

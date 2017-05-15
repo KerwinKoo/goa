@@ -12,7 +12,7 @@ import (
 
 	"github.com/goadesign/goa"
 
-	"golang.org/x/net/context"
+	"context"
 )
 
 // LogRequest creates a request logger middleware.
@@ -32,6 +32,16 @@ func LogRequest(verbose bool) goa.Middleware {
 			goa.LogInfo(ctx, "started", r.Method, r.URL.String(), "from", from(req),
 				"ctrl", goa.ContextController(ctx), "action", goa.ContextAction(ctx))
 			if verbose {
+				if len(r.Header) > 0 {
+					logCtx := make([]interface{}, 2*len(r.Header))
+					i := 0
+					for k, v := range r.Header {
+						logCtx[i] = k
+						logCtx[i+1] = interface{}(strings.Join(v, ", "))
+						i = i + 2
+					}
+					goa.LogInfo(ctx, "headers", logCtx...)
+				}
 				if len(r.Params) > 0 {
 					logCtx := make([]interface{}, 2*len(r.Params))
 					i := 0
@@ -66,10 +76,12 @@ func LogRequest(verbose bool) goa.Middleware {
 			resp := goa.ContextResponse(ctx)
 			if code := resp.ErrorCode; code != "" {
 				goa.LogInfo(ctx, "completed", "status", resp.Status, "error", code,
-					"bytes", resp.Length, "time", time.Since(startedAt).String())
+					"bytes", resp.Length, "time", time.Since(startedAt).String(),
+					"ctrl", goa.ContextController(ctx), "action", goa.ContextAction(ctx))
 			} else {
 				goa.LogInfo(ctx, "completed", "status", resp.Status,
-					"bytes", resp.Length, "time", time.Since(startedAt).String())
+					"bytes", resp.Length, "time", time.Since(startedAt).String(),
+					"ctrl", goa.ContextController(ctx), "action", goa.ContextAction(ctx))
 			}
 			return err
 		}

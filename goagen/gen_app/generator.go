@@ -12,12 +12,26 @@ import (
 	"github.com/goadesign/goa/goagen/utils"
 )
 
+//NewGenerator returns an initialized instance of an Application Generator
+func NewGenerator(options ...Option) *Generator {
+	g := &Generator{}
+	g.validator = codegen.NewValidator()
+
+	for _, option := range options {
+		option(g)
+	}
+
+	return g
+}
+
 // Generator is the application code generator.
 type Generator struct {
-	outDir   string   // Path to output directory
-	target   string   // Name of generated package
-	notest   bool     // Whether to skip test generation
-	genfiles []string // Generated files
+	API       *design.APIDefinition // The API definition
+	OutDir    string                // Path to output directory
+	Target    string                // Name of generated package
+	NoTest    bool                  // Whether to skip test generation
+	genfiles  []string              // Generated files
+	validator *codegen.Validator    // Validation code generator
 }
 
 // Generate is the generator entry point called by the meta generator.
@@ -33,25 +47,23 @@ func Generate() (files []string, err error) {
 	set.StringVar(&target, "pkg", "app", "")
 	set.StringVar(&ver, "version", "", "")
 	set.BoolVar(&notest, "notest", false, "")
+	set.Bool("force", false, "")
 	set.Parse(os.Args[1:])
 	outDir = filepath.Join(outDir, target)
 
-	// First check compatibility
 	if err := codegen.CheckVersion(ver); err != nil {
 		return nil, err
 	}
 
-	// Now proceed
 	target = codegen.Goify(target, false)
-	g := &Generator{outDir: outDir, target: target, notest: notest}
-	codegen.Reserved[target] = true
+	g := &Generator{OutDir: outDir, Target: target, NoTest: notest, API: design.Design, validator: codegen.NewValidator()}
 
-	return g.Generate(design.Design)
+	return g.Generate()
 }
 
 // Generate the application code, implement codegen.Generator.
-func (g *Generator) Generate(api *design.APIDefinition) (_ []string, err error) {
-	if api == nil {
+func (g *Generator) Generate() (_ []string, err error) {
+	if g.API == nil {
 		return nil, fmt.Errorf("missing API definition, make sure design is properly initialized")
 	}
 
@@ -63,32 +75,34 @@ func (g *Generator) Generate(api *design.APIDefinition) (_ []string, err error) 
 		}
 	}()
 
-	os.RemoveAll(g.outDir)
+	codegen.Reserved[g.Target] = true
 
-	if err := os.MkdirAll(g.outDir, 0755); err != nil {
+	os.RemoveAll(g.OutDir)
+
+	if err := os.MkdirAll(g.OutDir, 0755); err != nil {
 		return nil, err
 	}
-	g.genfiles = []string{g.outDir}
-	if err := g.generateContexts(api); err != nil {
+	g.genfiles = []string{g.OutDir}
+	if err := g.generateContexts(); err != nil {
 		return nil, err
 	}
-	if err := g.generateControllers(api); err != nil {
+	if err := g.generateControllers(); err != nil {
 		return nil, err
 	}
-	if err := g.generateSecurity(api); err != nil {
+	if err := g.generateSecurity(); err != nil {
 		return nil, err
 	}
-	if err := g.generateHrefs(api); err != nil {
+	if err := g.generateHrefs(); err != nil {
 		return nil, err
 	}
-	if err := g.generateMediaTypes(api); err != nil {
+	if err := g.generateMediaTypes(); err != nil {
 		return nil, err
 	}
-	if err := g.generateUserTypes(api); err != nil {
+	if err := g.generateUserTypes(); err != nil {
 		return nil, err
 	}
-	if !g.notest {
-		if err := g.generateResourceTest(api); err != nil {
+	if !g.NoTest {
+		if err := g.generateResourceTest(); err != nil {
 			return nil, err
 		}
 	}
@@ -101,34 +115,55 @@ func (g *Generator) Cleanup() {
 	if len(g.genfiles) == 0 {
 		return
 	}
-	os.RemoveAll(g.outDir)
+	os.RemoveAll(g.OutDir)
 	g.genfiles = nil
 }
 
 // generateContexts iterates through the API resources and actions and generates the action
 // contexts.
-func (g *Generator) generateContexts(api *design.APIDefinition) error {
-	ctxFile := filepath.Join(g.outDir, "contexts.go")
+func (g *Generator) generateContexts() error {
+	ctxFile := filepath.Join(g.OutDir, "contexts.go")
 	ctxWr, err := NewContextsWriter(ctxFile)
 	if err != nil {
 		panic(err) // bug
 	}
-	title := fmt.Sprintf("%s: Application Contexts", api.Context())
+	title := fmt.Sprintf("%s: Application Contexts", g.API.Context())
 	imports := []*codegen.ImportSpec{
 		codegen.SimpleImport("fmt"),
-		codegen.SimpleImport("golang.org/x/net/context"),
+		codegen.SimpleImport("net/http"),
 		codegen.SimpleImport("strconv"),
 		codegen.SimpleImport("strings"),
 		codegen.SimpleImport("time"),
+		codegen.SimpleImport("unicode/utf8"),
 		codegen.SimpleImport("github.com/goadesign/goa"),
 		codegen.NewImport("uuid", "github.com/satori/go.uuid"),
+		codegen.SimpleImport("context"),
 	}
+	g.API.IterateResources(func(r *design.ResourceDefinition) error {
+		return r.IterateActions(func(a *design.ActionDefinition) error {
+			if a.Payload != nil {
+				imports = codegen.AttributeImports(a.Payload.AttributeDefinition, imports, nil)
+			}
+			return nil
+		})
+	})
+
 	g.genfiles = append(g.genfiles, ctxFile)
-	ctxWr.WriteHeader(title, g.target, imports)
-	err = api.IterateResources(func(r *design.ResourceDefinition) error {
+	ctxWr.WriteHeader(title, g.Target, imports)
+	err = g.API.IterateResources(func(r *design.ResourceDefinition) error {
 		return r.IterateActions(func(a *design.ActionDefinition) error {
 			ctxName := codegen.Goify(a.Name, true) + codegen.Goify(a.Parent.Name, true) + "Context"
-			headers := r.Headers.Merge(a.Headers)
+			headers := &design.AttributeDefinition{
+				Type: design.Object{},
+			}
+			if r.Headers != nil {
+				headers.Merge(r.Headers)
+				headers.Validation = r.Headers.Validation
+			}
+			if a.Headers != nil {
+				headers.Merge(a.Headers)
+				headers.Validation = a.Headers.Validation
+			}
 			if headers != nil && len(headers.Type.ToObject()) == 0 {
 				headers = nil // So that {{if .Headers}} returns false in templates
 			}
@@ -152,8 +187,8 @@ func (g *Generator) generateContexts(api *design.APIDefinition) error {
 				Headers:      headers,
 				Routes:       a.Routes,
 				Responses:    non101,
-				API:          api,
-				DefaultPkg:   g.target,
+				API:          g.API,
+				DefaultPkg:   g.Target,
 				Security:     a.Security,
 			}
 			return ctxWr.Execute(&ctxData)
@@ -167,25 +202,26 @@ func (g *Generator) generateContexts(api *design.APIDefinition) error {
 
 // generateControllers iterates through the API resources and generates the low level
 // controllers.
-func (g *Generator) generateControllers(api *design.APIDefinition) error {
-	ctlFile := filepath.Join(g.outDir, "controllers.go")
+func (g *Generator) generateControllers() error {
+	ctlFile := filepath.Join(g.OutDir, "controllers.go")
 	ctlWr, err := NewControllersWriter(ctlFile)
 	if err != nil {
 		panic(err) // bug
 	}
-	title := fmt.Sprintf("%s: Application Controllers", api.Context())
+	title := fmt.Sprintf("%s: Application Controllers", g.API.Context())
 	imports := []*codegen.ImportSpec{
 		codegen.SimpleImport("net/http"),
 		codegen.SimpleImport("fmt"),
-		codegen.SimpleImport("golang.org/x/net/context"),
+		codegen.SimpleImport("context"),
 		codegen.SimpleImport("github.com/goadesign/goa"),
 		codegen.SimpleImport("github.com/goadesign/goa/cors"),
+		codegen.SimpleImport("regexp"),
 	}
-	encoders, err := BuildEncoders(api.Produces, true)
+	encoders, err := BuildEncoders(g.API.Produces, true)
 	if err != nil {
 		return err
 	}
-	decoders, err := BuildEncoders(api.Consumes, false)
+	decoders, err := BuildEncoders(g.API.Consumes, false)
 	if err != nil {
 		return err
 	}
@@ -206,11 +242,11 @@ func (g *Generator) generateControllers(api *design.APIDefinition) error {
 	for _, packagePath := range packagePaths {
 		imports = append(imports, codegen.SimpleImport(packagePath))
 	}
-	ctlWr.WriteHeader(title, g.target, imports)
+	ctlWr.WriteHeader(title, g.Target, imports)
 	ctlWr.WriteInitService(encoders, decoders)
 
 	var controllersData []*ControllerTemplateData
-	err = api.IterateResources(func(r *design.ResourceDefinition) error {
+	err = g.API.IterateResources(func(r *design.ResourceDefinition) error {
 		// Create file servers for all directory file servers that serve index.html.
 		fileServers := r.FileServers
 		for _, fs := range r.FileServers {
@@ -229,7 +265,7 @@ func (g *Generator) generateControllers(api *design.APIDefinition) error {
 			}
 		}
 		data := &ControllerTemplateData{
-			API:            api,
+			API:            g.API,
 			Resource:       codegen.Goify(r.Name, true),
 			PreflightPaths: r.PreflightPaths(),
 			FileServers:    fileServers,
@@ -239,6 +275,7 @@ func (g *Generator) generateControllers(api *design.APIDefinition) error {
 			unmarshal := fmt.Sprintf("unmarshal%s%sPayload", codegen.Goify(a.Name, true), codegen.Goify(r.Name, true))
 			action := map[string]interface{}{
 				"Name":            codegen.Goify(a.Name, true),
+				"DesignName":      a.Name,
 				"Routes":          a.Routes,
 				"Context":         context,
 				"Unmarshal":       unmarshal,
@@ -272,25 +309,25 @@ func (g *Generator) generateControllers(api *design.APIDefinition) error {
 
 // generateControllers iterates through the API resources and generates the low level
 // controllers.
-func (g *Generator) generateSecurity(api *design.APIDefinition) error {
-	if len(api.SecuritySchemes) == 0 {
+func (g *Generator) generateSecurity() error {
+	if len(g.API.SecuritySchemes) == 0 {
 		return nil
 	}
 
-	secFile := filepath.Join(g.outDir, "security.go")
+	secFile := filepath.Join(g.OutDir, "security.go")
 	secWr, err := NewSecurityWriter(secFile)
 	if err != nil {
 		panic(err) // bug
 	}
 
-	title := fmt.Sprintf("%s: Application Security", api.Context())
+	title := fmt.Sprintf("%s: Application Security", g.API.Context())
 	imports := []*codegen.ImportSpec{
 		codegen.SimpleImport("net/http"),
 		codegen.SimpleImport("errors"),
-		codegen.SimpleImport("golang.org/x/net/context"),
+		codegen.SimpleImport("context"),
 		codegen.SimpleImport("github.com/goadesign/goa"),
 	}
-	secWr.WriteHeader(title, g.target, imports)
+	secWr.WriteHeader(title, g.Target, imports)
 
 	g.genfiles = append(g.genfiles, secFile)
 
@@ -302,19 +339,20 @@ func (g *Generator) generateSecurity(api *design.APIDefinition) error {
 }
 
 // generateHrefs iterates through the API resources and generates the href factory methods.
-func (g *Generator) generateHrefs(api *design.APIDefinition) error {
-	hrefFile := filepath.Join(g.outDir, "hrefs.go")
+func (g *Generator) generateHrefs() error {
+	hrefFile := filepath.Join(g.OutDir, "hrefs.go")
 	resWr, err := NewResourcesWriter(hrefFile)
 	if err != nil {
 		panic(err) // bug
 	}
-	title := fmt.Sprintf("%s: Application Resource Href Factories", api.Context())
+	title := fmt.Sprintf("%s: Application Resource Href Factories", g.API.Context())
 	imports := []*codegen.ImportSpec{
 		codegen.SimpleImport("fmt"),
+		codegen.SimpleImport("strings"),
 	}
-	resWr.WriteHeader(title, g.target, imports)
-	err = api.IterateResources(func(r *design.ResourceDefinition) error {
-		m := api.MediaTypeWithIdentifier(r.MediaType)
+	resWr.WriteHeader(title, g.Target, imports)
+	err = g.API.IterateResources(func(r *design.ResourceDefinition) error {
+		m := g.API.MediaTypeWithIdentifier(r.MediaType)
 		var identifier string
 		if m != nil {
 			identifier = m.Identifier
@@ -340,21 +378,25 @@ func (g *Generator) generateHrefs(api *design.APIDefinition) error {
 
 // generateMediaTypes iterates through the media types and generate the data structures and
 // marshaling code.
-func (g *Generator) generateMediaTypes(api *design.APIDefinition) error {
-	mtFile := filepath.Join(g.outDir, "media_types.go")
+func (g *Generator) generateMediaTypes() error {
+	mtFile := filepath.Join(g.OutDir, "media_types.go")
 	mtWr, err := NewMediaTypesWriter(mtFile)
 	if err != nil {
 		panic(err) // bug
 	}
-	title := fmt.Sprintf("%s: Application Media Types", api.Context())
+	title := fmt.Sprintf("%s: Application Media Types", g.API.Context())
 	imports := []*codegen.ImportSpec{
 		codegen.SimpleImport("github.com/goadesign/goa"),
 		codegen.SimpleImport("fmt"),
 		codegen.SimpleImport("time"),
+		codegen.SimpleImport("unicode/utf8"),
 		codegen.NewImport("uuid", "github.com/satori/go.uuid"),
 	}
-	mtWr.WriteHeader(title, g.target, imports)
-	err = api.IterateMediaTypes(func(mt *design.MediaTypeDefinition) error {
+	for _, v := range g.API.MediaTypes {
+		imports = codegen.AttributeImports(v.AttributeDefinition, imports, nil)
+	}
+	mtWr.WriteHeader(title, g.Target, imports)
+	err = g.API.IterateMediaTypes(func(mt *design.MediaTypeDefinition) error {
 		if mt.IsError() {
 			return nil
 		}
@@ -372,20 +414,25 @@ func (g *Generator) generateMediaTypes(api *design.APIDefinition) error {
 
 // generateUserTypes iterates through the user types and generates the data structures and
 // marshaling code.
-func (g *Generator) generateUserTypes(api *design.APIDefinition) error {
-	utFile := filepath.Join(g.outDir, "user_types.go")
+func (g *Generator) generateUserTypes() error {
+	utFile := filepath.Join(g.OutDir, "user_types.go")
 	utWr, err := NewUserTypesWriter(utFile)
 	if err != nil {
 		panic(err) // bug
 	}
-	title := fmt.Sprintf("%s: Application User Types", api.Context())
+	title := fmt.Sprintf("%s: Application User Types", g.API.Context())
 	imports := []*codegen.ImportSpec{
-		codegen.SimpleImport("github.com/goadesign/goa"),
 		codegen.SimpleImport("fmt"),
 		codegen.SimpleImport("time"),
+		codegen.SimpleImport("unicode/utf8"),
+		codegen.SimpleImport("github.com/goadesign/goa"),
+		codegen.NewImport("uuid", "github.com/satori/go.uuid"),
 	}
-	utWr.WriteHeader(title, g.target, imports)
-	err = api.IterateUserTypes(func(t *design.UserTypeDefinition) error {
+	for _, v := range g.API.Types {
+		imports = codegen.AttributeImports(v.AttributeDefinition, imports, nil)
+	}
+	utWr.WriteHeader(title, g.Target, imports)
+	err = g.API.IterateUserTypes(func(t *design.UserTypeDefinition) error {
 		return utWr.Execute(t)
 	})
 	g.genfiles = append(g.genfiles, utFile)

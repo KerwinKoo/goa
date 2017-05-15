@@ -14,7 +14,7 @@ import (
 	"github.com/goadesign/goa/goagen/codegen"
 )
 
-func (g *Generator) generateMain(mainFile string, clientPkg, cliPkg string, funcs template.FuncMap, api *design.APIDefinition) error {
+func (g *Generator) generateMain(mainFile string, clientPkg, cliPkg string, funcs template.FuncMap) error {
 	imports := []*codegen.ImportSpec{
 		codegen.SimpleImport("encoding/json"),
 		codegen.SimpleImport("fmt"),
@@ -52,7 +52,7 @@ func (g *Generator) generateMain(mainFile string, clientPkg, cliPkg string, func
 	hasBasicAuthSigners := false
 	hasAPIKeySigners := false
 	hasTokenSigners := false
-	for _, s := range api.SecuritySchemes {
+	for _, s := range g.API.SecuritySchemes {
 		if signerType(s) != "" {
 			hasSigners = true
 			switch s.Type {
@@ -75,9 +75,9 @@ func (g *Generator) generateMain(mainFile string, clientPkg, cliPkg string, func
 		HasAPIKeySigners    bool
 		HasTokenSigners     bool
 	}{
-		API:                 api,
+		API:                 g.API,
 		Version:             version,
-		Package:             g.target,
+		Package:             g.Target,
 		HasSigners:          hasSigners,
 		HasBasicAuthSigners: hasBasicAuthSigners,
 		HasAPIKeySigners:    hasAPIKeySigners,
@@ -90,7 +90,7 @@ func (g *Generator) generateMain(mainFile string, clientPkg, cliPkg string, func
 	return file.FormatCode()
 }
 
-func (g *Generator) generateCommands(commandsFile string, clientPkg string, funcs template.FuncMap, api *design.APIDefinition) error {
+func (g *Generator) generateCommands(commandsFile string, clientPkg string, funcs template.FuncMap) error {
 	file, err := codegen.SourceFileFor(commandsFile)
 	if err != nil {
 		return err
@@ -99,11 +99,13 @@ func (g *Generator) generateCommands(commandsFile string, clientPkg string, func
 	funcs["defaultRouteParams"] = defaultRouteParams
 	funcs["defaultRouteTemplate"] = defaultRouteTemplate
 	funcs["joinNames"] = joinNames
+	funcs["joinRouteParams"] = joinRouteParams
 	funcs["routes"] = routes
 	funcs["flagType"] = flagType
 	funcs["cmdFieldType"] = cmdFieldTypeString
 	funcs["formatExample"] = formatExample
 	funcs["shouldAddExample"] = shouldAddExample
+	funcs["kebabCase"] = codegen.KebabCase
 
 	commandTypesTmpl := template.Must(template.New("commandTypes").Funcs(funcs).Parse(commandTypesTmpl))
 	commandsTmpl := template.Must(template.New("commands").Funcs(funcs).Parse(commandsTmpl))
@@ -115,6 +117,7 @@ func (g *Generator) generateCommands(commandsFile string, clientPkg string, func
 		codegen.SimpleImport("encoding/json"),
 		codegen.SimpleImport("fmt"),
 		codegen.SimpleImport("log"),
+		codegen.SimpleImport("net/url"),
 		codegen.SimpleImport("os"),
 		codegen.SimpleImport("path"),
 		codegen.SimpleImport("path/filepath"),
@@ -124,21 +127,22 @@ func (g *Generator) generateCommands(commandsFile string, clientPkg string, func
 		codegen.SimpleImport("github.com/goadesign/goa"),
 		codegen.SimpleImport("github.com/spf13/cobra"),
 		codegen.SimpleImport(clientPkg),
-		codegen.SimpleImport("golang.org/x/net/context"),
+		codegen.SimpleImport("context"),
 		codegen.SimpleImport("golang.org/x/net/websocket"),
 		codegen.NewImport("uuid", "github.com/goadesign/goa/uuid"),
 	}
-	if len(api.Resources) > 0 {
+	if len(g.API.Resources) > 0 {
 		imports = append(imports, codegen.NewImport("goaclient", "github.com/goadesign/goa/client"))
 	}
-	if err := file.WriteHeader("", "cli", imports); err != nil {
+	title := fmt.Sprintf("%s: CLI Commands", g.API.Context())
+	if err := file.WriteHeader(title, "cli", imports); err != nil {
 		return err
 	}
 	g.genfiles = append(g.genfiles, commandsFile)
 
 	file.Write([]byte("type (\n"))
 	var fs []*design.FileServerDefinition
-	if err := api.IterateResources(func(res *design.ResourceDefinition) error {
+	if err := g.API.IterateResources(func(res *design.ResourceDefinition) error {
 		fs = append(fs, res.FileServers...)
 		return res.IterateActions(func(action *design.ActionDefinition) error {
 			return commandTypesTmpl.Execute(file, action)
@@ -153,7 +157,7 @@ func (g *Generator) generateCommands(commandsFile string, clientPkg string, func
 
 	actions := make(map[string][]*design.ActionDefinition)
 	hasDownloads := false
-	api.IterateResources(func(res *design.ResourceDefinition) error {
+	g.API.IterateResources(func(res *design.ResourceDefinition) error {
 		if len(res.FileServers) > 0 {
 			hasDownloads = true
 		}
@@ -173,16 +177,16 @@ func (g *Generator) generateCommands(commandsFile string, clientPkg string, func
 		HasDownloads bool
 	}{
 		Actions:      actions,
-		Package:      g.target,
+		Package:      g.Target,
 		HasDownloads: hasDownloads,
 	}
 	if err := file.ExecuteTemplate("registerCmds", registerCmdsT, funcs, data); err != nil {
 		return err
 	}
 
-	err = api.IterateResources(func(res *design.ResourceDefinition) error {
+	var fsdata []map[string]interface{}
+	g.API.IterateResources(func(res *design.ResourceDefinition) error {
 		if res.FileServers != nil {
-			var fsdata []map[string]interface{}
 			res.IterateFileServers(func(fs *design.FileServerDefinition) error {
 				wcs := design.ExtractWildcards(fs.RequestPath)
 				isDir := len(wcs) > 0
@@ -202,22 +206,28 @@ func (g *Generator) generateCommands(commandsFile string, clientPkg string, func
 				})
 				return nil
 			})
-			data := struct {
-				Package     string
-				FileServers []map[string]interface{}
-			}{
-				Package:     g.target,
-				FileServers: fsdata,
-			}
-			if err := downloadCommandTmpl.Execute(file, data); err != nil {
-				return err
-			}
 		}
+		return nil
+	})
+	if fsdata != nil {
+		data := struct {
+			Package     string
+			FileServers []map[string]interface{}
+		}{
+			Package:     g.Target,
+			FileServers: fsdata,
+		}
+		if err := downloadCommandTmpl.Execute(file, data); err != nil {
+			return err
+		}
+	}
+	err = g.API.IterateResources(func(res *design.ResourceDefinition) error {
 		return res.IterateActions(func(action *design.ActionDefinition) error {
 			data := map[string]interface{}{
-				"Action":   action,
-				"Resource": action.Parent,
-				"Package":  g.target,
+				"Action":          action,
+				"Resource":        action.Parent,
+				"Package":         g.Target,
+				"HasMultiContent": len(g.API.Consumes) > 1,
 			}
 			var err error
 			if action.WebSocket() {
@@ -259,6 +269,28 @@ func defaultRouteTemplate(a *design.ActionDefinition) string {
 	return design.WildcardRegex.ReplaceAllLiteralString(a.Routes[0].FullPath(), "/%v")
 }
 
+// return a ',' joined list of Params as a reference to cmd.XFieldName
+// ordered by the required first rules.
+func joinRouteParams(action *design.ActionDefinition, att *design.AttributeDefinition) string {
+	var (
+		params = action.Routes[0].Params()
+		elems  = make([]string, len(params))
+	)
+	for i, p := range params {
+		patt, ok := att.Type.ToObject()[p]
+		if !ok {
+			continue
+		}
+		pf := "cmd.%s"
+		if patt.Type.Kind() == design.StringKind {
+			pf = "url.QueryEscape(cmd.%s)"
+		}
+		field := fmt.Sprintf(pf, codegen.Goify(p, true))
+		elems[i] = field
+	}
+	return strings.Join(elems, ", ")
+}
+
 // joinNames is a code generation helper function that generates a string built from concatenating
 // the keys of the given attribute type (assuming it's an object).
 func joinNames(useNil bool, atts ...*design.AttributeDefinition) string {
@@ -290,7 +322,7 @@ func joinNames(useNil bool, atts ...*design.AttributeDefinition) string {
 			} else if a.Type.IsArray() {
 				field = flagTypeArrayVal(a, field)
 			} else {
-				field = flagNonRequiredTypeVal(a, field)
+				field = flagRequiredTypeVal(a, field)
 			}
 			if att.IsRequired(n) {
 				names = append(names, field)
@@ -304,6 +336,8 @@ func joinNames(useNil bool, atts ...*design.AttributeDefinition) string {
 	return strings.Join(elems, ", ")
 }
 
+// resolve non required, non array Param/QueryParam for access via CII flags.
+// Some types need convertion from string to 'Type' before calling rich client Commands.
 func flagTypeVal(a *design.AttributeDefinition, key string, field string) string {
 	switch a.Type {
 	case design.Integer:
@@ -317,7 +351,11 @@ func flagTypeVal(a *design.AttributeDefinition, key string, field string) string
 	}
 }
 
-func flagNonRequiredTypeVal(a *design.AttributeDefinition, field string) string {
+// resolve required Param/QueryParam for access via CII flags.
+// Required Params are not generated as pointers
+// Special types like Number/UUID need to be converted from String
+// %s maps to specialTypeResult.Temps
+func flagRequiredTypeVal(a *design.AttributeDefinition, field string) string {
 	switch a.Type {
 	case design.Number, design.Boolean, design.UUID, design.DateTime, design.Any:
 		return "*%s"
@@ -326,6 +364,9 @@ func flagNonRequiredTypeVal(a *design.AttributeDefinition, field string) string 
 	}
 }
 
+// resolve required Param/QueryParam for access via CII flags.
+// Special types like Number/UUID need to be converted from String
+// %s maps to specialTypeResult.Temps
 func flagTypeArrayVal(a *design.AttributeDefinition, field string) string {
 	switch a.Type.ToArray().ElemType.Type {
 	case design.Number, design.Boolean, design.UUID, design.DateTime, design.Any:
@@ -334,6 +375,7 @@ func flagTypeArrayVal(a *design.AttributeDefinition, field string) string {
 	return field
 }
 
+// format a stirng format("%s") with the given vars as argument
 func format(format string, vars []string) string {
 	new := make([]interface{}, len(vars))
 	for i, v := range vars {
@@ -342,11 +384,23 @@ func format(format string, vars []string) string {
 	return fmt.Sprintf(format, new...)
 }
 
+// temp structure to describe the relationship between XParams
+// and their tmp var as generated in the Output. See handleSpecialTypes
 type specialTypeResult struct {
 	Temps  []string
 	Output string
 }
 
+// generate the relation and output of specially typed Params that need
+// custom convertion from String Flags to Rich objects in Client action
+//
+// tmp, err := uuidVal(cmd.X)
+// if err != nil {
+//        goa.LogError(ctx, "argument parse failed", "err", err)
+//        return err
+// }
+// resp, err := c.ShowX(ctx, path, tmp)
+//
 func handleSpecialTypes(atts ...*design.AttributeDefinition) specialTypeResult {
 	result := specialTypeResult{}
 	for _, att := range atts {
@@ -366,9 +420,10 @@ func handleSpecialTypes(atts ...*design.AttributeDefinition) specialTypeResult {
 		for _, n := range keys {
 			a := obj[n]
 			field := fmt.Sprintf("cmd.%s", codegen.Goify(n, true))
-
-			var typeHandler string
+			typ := cmdFieldType(a.Type, true)
+			var typeHandler, nilVal string
 			if !a.Type.IsArray() {
+				nilVal = `""`
 				switch a.Type {
 				case design.Number:
 					typeHandler = "float64Val"
@@ -383,6 +438,7 @@ func handleSpecialTypes(atts ...*design.AttributeDefinition) specialTypeResult {
 				}
 
 			} else if a.Type.IsArray() {
+				nilVal = "nil"
 				switch a.Type.ToArray().ElemType.Type {
 				case design.Number:
 					typeHandler = "float64Array"
@@ -406,12 +462,22 @@ func handleSpecialTypes(atts ...*design.AttributeDefinition) specialTypeResult {
 
 				//result.Temps = append(result.Temps, tmpVar)
 				result.Output += fmt.Sprintf(`
-	%s, err := %s(%s)
-	if err != nil {
-		goa.LogError(ctx, "argument parse failed", "err", err)
-		return err
-	}`, tmpVar, typeHandler, field)
-
+	var %s %s
+	if %s != %s {
+		var err error
+		%s, err = %s(%s)
+		if err != nil {
+			goa.LogError(ctx, "failed to parse flag into %s value", "flag", "--%s", "err", err)
+			return err
+		}
+	}`, tmpVar, typ, field, nilVal, tmpVar, typeHandler, field, typ, n)
+				if att.IsRequired(n) {
+					result.Output += fmt.Sprintf(`
+	if %s == nil {
+		goa.LogError(ctx, "required flag is missing", "flag", "--%s")
+		return fmt.Errorf("required flag %s is missing")
+	}`, tmpVar, n, n)
+				}
 			}
 		}
 		result.Temps = append(result.Temps, names...)
@@ -602,7 +668,7 @@ func new{{ goify $security.SchemeName true }}Signer({{ signerSignature $security
 		SignQuery: {{ if eq $security.In "query" }}true{{ else }}false{{ end }},
 		KeyName: "{{ $security.Name }}",
 		KeyValue: key,
-		Format: format,
+		Format: {{ if eq $security.In "query" }}"%s"{{ else }}format{{ end }},
 	}
 {{ else if eq .Type "jwt" }}	return &goaclient.JWTSigner{
 		TokenSource: source,
@@ -615,7 +681,7 @@ func new{{ goify $security.SchemeName true }}Signer({{ signerSignature $security
 {{ end }}{{ end }}
 `
 
-const commandTypesTmpl = `{{ $cmdName := goify (printf "%s%s%s" .Name (title .Parent.Name) "Command") true }}	// {{ $cmdName }} is the command line data structure for the {{ .Name }} action of {{ .Parent.Name }}
+const commandTypesTmpl = `{{ $cmdName := goify (printf "%s%sCommand" .Name (title (kebabCase .Parent.Name))) true }}	// {{ $cmdName }} is the command line data structure for the {{ .Name }} action of {{ .Parent.Name }}
 	{{ $cmdName }} struct {
 {{ if .Payload }}		Payload string
 		ContentType string
@@ -639,14 +705,14 @@ const downloadCommandType = `// DownloadCommand is the command line data structu
 `
 
 const commandsTmplWS = `
-{{ $cmdName := goify (printf "%s%sCommand" .Action.Name (title .Resource.Name)) true }}// Run establishes a websocket connection for the {{ $cmdName }} command.
+{{ $cmdName := goify (printf "%s%sCommand" .Action.Name (title (kebabCase .Resource.Name))) true }}// Run establishes a websocket connection for the {{ $cmdName }} command.
 func (cmd *{{ $cmdName }}) Run(c *{{ .Package }}.Client, args []string) error {
 	var path string
 	if len(args) > 0 {
 		path = args[0]
 	} else {
 {{ $default := defaultPath .Action }}{{ if $default }}	path = "{{ $default }}"
-{{ else }}{{ $pparams := defaultRouteParams .Action }}	path = fmt.Sprintf({{ printf "%q" (defaultRouteTemplate .Action)}}, {{ joinNames false $pparams }})
+{{ else }}{{ $pparams := defaultRouteParams .Action }}	path = fmt.Sprintf({{ printf "%q" (defaultRouteTemplate .Action)}}, {{ joinRouteParams .Action $pparams }})
 {{ end }}	}
 	logger := goa.NewLogger(log.New(os.Stderr, "", log.LstdFlags))
 	ctx := goa.WithLogger(context.Background(), logger){{ $specialTypeResult := handleSpecialTypes .Action.QueryParams .Action.Headers }}{{ $specialTypeResult.Output }}
@@ -712,7 +778,7 @@ found:
 }
 `
 
-const registerTmpl = `{{ $cmdName := goify (printf "%s%sCommand" .Action.Name (title .Resource.Name)) true }}// RegisterFlags registers the command flags with the command line.
+const registerTmpl = `{{ $cmdName := goify (printf "%s%sCommand" .Action.Name (title (kebabCase .Resource.Name))) true }}// RegisterFlags registers the command flags with the command line.
 func (cmd *{{ $cmdName }}) RegisterFlags(cc *cobra.Command, c *{{ .Package }}.Client) {
 {{ if .Action.Payload }}	cc.Flags().StringVar(&cmd.Payload, "payload", "", "Request body encoded in JSON")
 	cc.Flags().StringVar(&cmd.ContentType, "content", "", "Request content type override, e.g. 'application/x-www-form-urlencoded'")
@@ -730,14 +796,14 @@ func (cmd *{{ $cmdName }}) RegisterFlags(cc *cobra.Command, c *{{ .Package }}.Cl
 {{ end }}{{ end }}}`
 
 const commandsTmpl = `
-{{ $cmdName := goify (printf "%s%sCommand" .Action.Name (title .Resource.Name)) true }}// Run makes the HTTP request corresponding to the {{ $cmdName }} command.
+{{ $cmdName := goify (printf "%s%sCommand" .Action.Name (title (kebabCase .Resource.Name))) true }}// Run makes the HTTP request corresponding to the {{ $cmdName }} command.
 func (cmd *{{ $cmdName }}) Run(c *{{ .Package }}.Client, args []string) error {
 	var path string
 	if len(args) > 0 {
 		path = args[0]
 	} else {
 {{ $default := defaultPath .Action }}{{ if $default }}	path = "{{ $default }}"
-{{ else }}{{ $pparams := defaultRouteParams .Action }}	path = fmt.Sprintf({{ printf "%q" (defaultRouteTemplate .Action) }}, {{ joinNames false $pparams }})
+{{ else }}{{ $pparams := defaultRouteParams .Action }}	path = fmt.Sprintf({{ printf "%q" (defaultRouteTemplate .Action) }}, {{ joinRouteParams .Action $pparams }})
 {{ end }}	}
 {{ if .Action.Payload }}var payload {{ gotyperefext .Action.Payload 2 .Package }}
 	if cmd.Payload != "" {
@@ -752,7 +818,7 @@ func (cmd *{{ $cmdName }}) Run(c *{{ .Package }}.Client, args []string) error {
 	resp, err := c.{{ goify (printf "%s%s" .Action.Name (title .Resource.Name)) true }}(ctx, path{{ if .Action.Payload }}, {{/*
 	*/}}{{ if or .Action.Payload.Type.IsObject .Action.Payload.IsPrimitive }}&{{ end }}payload{{ else }}{{ end }}{{/*
 	*/}}{{ $params := joinNames true .Action.QueryParams .Action.Headers }}{{ if $params }}, {{ format $params $specialTypeResult.Temps }}{{ end }}{{/*
-	*/}}{{ if .Action.Payload }}, cmd.ContentType{{ end }})
+	*/}}{{ if and .Action.Payload .HasMultiContent }}, cmd.ContentType{{ end }})
 	if err != nil {
 		goa.LogError(ctx, "failed", "err", err)
 		return err
@@ -768,13 +834,13 @@ const registerCmdsT = `// RegisterCommands registers the resource action CLI com
 func RegisterCommands(app *cobra.Command, c *{{ .Package }}.Client) {
 {{ with .Actions }}{{ if gt (len .) 0 }}	var command, sub *cobra.Command
 {{ end }}{{ range $name, $actions := . }}	command = &cobra.Command{
-		Use:   "{{ $name }}",
+		Use:   "{{ kebabCase $name }}",
 		Short: ` + "`" + `{{ if eq (len $actions) 1 }}{{ $a := index $actions 0 }}{{ escapeBackticks $a.Description }}{{ else }}{{ $name }} action{{ end }}` + "`" + `,
 	}
-{{ range $action := $actions }}{{ $cmdName := goify (printf "%s%sCommand" $action.Name (title $action.Parent.Name)) true }}{{/*
+{{ range $action := $actions }}{{ $cmdName := goify (printf "%s%sCommand" $action.Name (title (kebabCase $action.Parent.Name))) true }}{{/*
 */}}{{ $tmp := tempvar }}	{{ $tmp }} := new({{ $cmdName }})
 	sub = &cobra.Command{
-		Use:   ` + "`" + `{{ $action.Parent.Name }} {{ routes $action }}` + "`" + `,
+		Use:   ` + "`" + `{{ kebabCase $action.Parent.Name }} {{ routes $action }}` + "`" + `,
 		Short: ` + "`" + `{{ escapeBackticks $action.Parent.Description }}` + "`" + `,{{ if shouldAddExample $action.Payload }}
 		Long:  ` + "`" + `{{ escapeBackticks $action.Parent.Description }}
 
@@ -862,7 +928,7 @@ func jsonArray(ins []string) ([]interface{}, error) {
 }
 
 func timeVal(val string) (*time.Time, error) {
-	t, err := time.Parse("RFC3339", val)
+	t, err := time.Parse(time.RFC3339, val)
 	if err != nil {
 		return nil, err
 	}

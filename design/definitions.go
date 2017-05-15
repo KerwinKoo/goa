@@ -157,10 +157,12 @@ type (
 		Methods []string
 		// List of headers exposed to clients
 		Exposed []string
-		// How long to cache a prefligh request response
+		// How long to cache a preflight request response
 		MaxAge uint
 		// Sets Access-Control-Allow-Credentials header
 		Credentials bool
+		// Sets Whether the Origin string is a regular expression
+		Regexp bool
 	}
 
 	// EncodingDefinition defines an encoder supported by the API.
@@ -302,6 +304,8 @@ type (
 		Path string
 		// Parent is the action this route applies to.
 		Parent *ActionDefinition
+		// Metadata is a list of key/value pairs
+		Metadata dslengine.MetadataDefinition
 	}
 
 	// AttributeDefinition defines a JSON object member with optional description, default
@@ -481,17 +485,24 @@ func (a *APIDefinition) IterateSets(iterator dslengine.SetIterator) {
 	}
 	iterator(securitySchemes)
 
-	// And now that we have everything the resources.  The resource
-	// lifecycle handlers dispatch to their children elements, like
-	// Actions, etc..
-	resources := make([]dslengine.Definition, len(a.Resources))
+	// And now that we have everything - the resources. The resource
+	// lifecycle handlers dispatch to their children elements, like Actions,
+	// etc.. We must process parent resources first to ensure that query
+	// string and path parameters are initialized by the time a child
+	// resource action parameters are categorized.
+	resources := make([]*ResourceDefinition, len(a.Resources))
 	i = 0
 	a.IterateResources(func(res *ResourceDefinition) error {
 		resources[i] = res
 		i++
 		return nil
 	})
-	iterator(resources)
+	sort.Sort(byParent(resources))
+	defs := make([]dslengine.Definition, len(resources))
+	for i, r := range resources {
+		defs[i] = r
+	}
+	iterator(defs)
 }
 
 // Reset sets all the API definition fields to their zero value except the default responses and
@@ -507,6 +518,16 @@ func (a *APIDefinition) Context() string {
 		return fmt.Sprintf("API %#v", a.Name)
 	}
 	return "unnamed API"
+}
+
+// PathParams returns the base path parameters of a.
+func (a *APIDefinition) PathParams() *AttributeDefinition {
+	names := ExtractWildcards(a.BasePath)
+	obj := make(Object)
+	for _, n := range names {
+		obj[n] = a.Params.Type.ToObject()[n]
+	}
+	return &AttributeDefinition{Type: obj}
 }
 
 // IterateMediaTypes calls the given iterator passing in each media type sorted in alphabetical order.
@@ -663,6 +684,20 @@ func (r *ResourceDefinition) Context() string {
 	return "unnamed resource"
 }
 
+// PathParams returns the base path parameters of r.
+func (r *ResourceDefinition) PathParams() *AttributeDefinition {
+	names := ExtractWildcards(r.BasePath)
+	obj := make(Object)
+	if r.Params != nil {
+		for _, n := range names {
+			if p, ok := r.Params.Type.ToObject()[n]; ok {
+				obj[n] = p
+			}
+		}
+	}
+	return &AttributeDefinition{Type: obj}
+}
+
 // IterateActions calls the given iterator passing in each resource action sorted in alphabetical order.
 // Iteration stops if an iterator returns an error and in this case IterateActions returns that
 // error.
@@ -802,6 +837,20 @@ func (r *ResourceDefinition) PreflightPaths() []string {
 		}
 		return nil
 	})
+	r.IterateFileServers(func(fs *FileServerDefinition) error {
+		found := false
+		fp := fs.RequestPath
+		for _, p := range paths {
+			if fp == p {
+				found = true
+				break
+			}
+		}
+		if !found {
+			paths = append(paths, fp)
+		}
+		return nil
+	})
 	return paths
 }
 
@@ -814,11 +863,22 @@ func (r *ResourceDefinition) DSL() func() {
 // parameters, initializes querystring parameters, sets path parameters as non zero attributes
 // and sets the fallbacks for security schemes.
 func (r *ResourceDefinition) Finalize() {
+	meta := r.Metadata["swagger:generate"]
 	r.IterateFileServers(func(f *FileServerDefinition) error {
+		if meta != nil {
+			if _, ok := f.Metadata["swagger:generate"]; !ok {
+				f.Metadata["swagger:generate"] = meta
+			}
+		}
 		f.Finalize()
 		return nil
 	})
 	r.IterateActions(func(a *ActionDefinition) error {
+		if meta != nil {
+			if _, ok := a.Metadata["swagger:generate"]; !ok {
+				a.Metadata["swagger:generate"] = meta
+			}
+		}
 		a.Finalize()
 		return nil
 	})
@@ -837,6 +897,13 @@ func (r *ResourceDefinition) UserTypes() map[string]*UserTypeDefinition {
 	}
 	return types
 }
+
+// byParent makes it possible to sort resources - parents first the children.
+type byParent []*ResourceDefinition
+
+func (p byParent) Len() int           { return len(p) }
+func (p byParent) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p byParent) Less(i, j int) bool { return p[j].ParentName == p[i].Name }
 
 // Context returns the generic definition name used in error messages.
 func (cors *CORSDefinition) Context() string {
@@ -1054,7 +1121,7 @@ func (a *AttributeDefinition) objectExample(rand *RandomGenerator, seen []string
 	if mt, ok := a.Type.(*MediaTypeDefinition); ok {
 		v := a.View
 		if v == "" {
-			v = mt.DefaultView()
+			v = DefaultView
 		}
 		projected, _, err := mt.Project(v)
 		if err != nil {
@@ -1331,11 +1398,12 @@ func (a *ActionDefinition) AllParams() *AttributeDefinition {
 	if a.HasAbsoluteRoutes() {
 		return res
 	}
+	res = res.Merge(a.Parent.Params)
 	if p := a.Parent.Parent(); p != nil {
-		res = res.Merge(p.CanonicalAction().AllParams())
+		res = res.Merge(p.CanonicalAction().PathParams())
 	} else {
-		res = res.Merge(a.Parent.Params)
-		res = res.Merge(Design.Params)
+		res = res.Merge(a.Parent.PathParams())
+		res = res.Merge(Design.PathParams())
 	}
 	return res
 }
@@ -1553,6 +1621,7 @@ func (a *ActionDefinition) initQueryParams() {
 	// 3. Compute QueryParams from Params and set all path params as non zero attributes
 	if params := a.AllParams(); params != nil {
 		queryParams := DupAtt(params)
+		queryParams.Type = Dup(queryParams.Type)
 		if a.Params == nil {
 			a.Params = &AttributeDefinition{Type: Object{}}
 		}

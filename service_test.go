@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"golang.org/x/net/context"
+	"context"
 
 	"github.com/goadesign/goa"
 	. "github.com/onsi/ginkgo"
@@ -136,6 +136,7 @@ var _ = Describe("Service", func() {
 					rw.Write([]byte(err.Error()))
 					return nil
 				}
+				goa.ContextRequest(c).Request = req
 				ctx = c
 				rw.WriteHeader(respStatus)
 				rw.Write(respContent)

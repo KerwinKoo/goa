@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/goadesign/goa/design"
 	"github.com/goadesign/goa/dslengine"
@@ -61,16 +62,45 @@ var _ = Describe("Generate", func() {
 				TypeName:            "CustomName",
 			}
 
+			intAttr := &design.AttributeDefinition{
+				Type:       design.Object{"foo": &design.AttributeDefinition{Type: design.Integer}},
+				Validation: &dslengine.ValidationDefinition{Required: []string{"foo"}},
+			}
+
+			intMedia := &design.MediaTypeDefinition{
+				Identifier: "application/vnd.goa.test.int",
+				UserTypeDefinition: &design.UserTypeDefinition{
+					AttributeDefinition: intAttr,
+					TypeName:            "IntContainer",
+				},
+			}
+
+			defaultView := &design.ViewDefinition{
+				AttributeDefinition: intAttr,
+				Name:                "default",
+				Parent:              intMedia,
+			}
+
+			intMedia.Views = map[string]*design.ViewDefinition{"default": defaultView}
+
 			design.Design = &design.APIDefinition{
 				Name:        "testapi",
 				Title:       "dummy API with no resource",
 				Description: "I told you it's dummy",
 				MediaTypes: map[string]*design.MediaTypeDefinition{
 					design.ErrorMedia.Identifier: design.ErrorMedia,
+					intMedia.Identifier:          intMedia,
 				},
 				Resources: map[string]*design.ResourceDefinition{
 					"foo": {
 						Name: "foo",
+						Headers: &design.AttributeDefinition{
+							Type: design.Object{
+								"optionalResourceHeader": &design.AttributeDefinition{Type: design.Integer},
+								"requiredResourceHeader": &design.AttributeDefinition{Type: design.String},
+							},
+							Validation: &dslengine.ValidationDefinition{Required: []string{"requiredResourceHeader"}},
+						},
 						Actions: map[string]*design.ActionDefinition{
 							"show": {
 								Name: "show",
@@ -81,13 +111,22 @@ var _ = Describe("Generate", func() {
 										"uuid":     &design.AttributeDefinition{Type: design.UUID},
 										"optional": &design.AttributeDefinition{Type: design.Integer},
 										"required": &design.AttributeDefinition{Type: design.DateTime},
+										"query":    &design.AttributeDefinition{Type: design.String},
 									},
 									Validation: &dslengine.ValidationDefinition{Required: []string{"required"}},
+								},
+								Headers: &design.AttributeDefinition{
+									Type: design.Object{
+										"optionalHeader": &design.AttributeDefinition{Type: design.Integer},
+										"requiredHeader": &design.AttributeDefinition{Type: design.String},
+									},
+									Validation: &dslengine.ValidationDefinition{Required: []string{"requiredHeader", "requiredResourceHeader"}},
 								},
 								QueryParams: &design.AttributeDefinition{
 									Type: design.Object{
 										"optional": &design.AttributeDefinition{Type: design.Integer},
 										"required": &design.AttributeDefinition{Type: design.DateTime},
+										"query":    &design.AttributeDefinition{Type: design.String},
 									},
 									Validation: &dslengine.ValidationDefinition{Required: []string{"required"}},
 								},
@@ -103,7 +142,9 @@ var _ = Describe("Generate", func() {
 								},
 								Responses: map[string]*design.ResponseDefinition{
 									"ok": {
-										Name: "ok",
+										Name:      "ok",
+										Status:    200,
+										MediaType: intMedia.Identifier,
 									},
 								},
 							},
@@ -142,6 +183,15 @@ var _ = Describe("Generate", func() {
 			}
 		})
 
+		It("does not call Validate on the resulting media type when it does not exist", func() {
+			Ω(genErr).Should(BeNil())
+			Ω(files).Should(HaveLen(8))
+			content, err := ioutil.ReadFile(filepath.Join(outDir, "app", "test", "foo_testing.go"))
+			Ω(err).ShouldNot(HaveOccurred())
+
+			Ω(content).ShouldNot(ContainSubstring("err = mt.Validate()"))
+		})
+
 		It("generates the ActionRouteResponse test methods ", func() {
 			Ω(genErr).Should(BeNil())
 			Ω(files).Should(HaveLen(8))
@@ -152,7 +202,7 @@ var _ = Describe("Generate", func() {
 			// Multiple Routes
 			Ω(content).Should(ContainSubstring("ShowFooOK1("))
 			// Get returns an error media type
-			Ω(content).Should(ContainSubstring("GetFooOK(t *testing.T, ctx context.Context, service *goa.Service, ctrl app.FooController, payload app.CustomName) (http.ResponseWriter, error)"))
+			Ω(content).Should(ContainSubstring("GetFooOK(t goatest.TInterface, ctx context.Context, service *goa.Service, ctrl app.FooController, optionalResourceHeader *int, requiredResourceHeader string, payload app.CustomName) (http.ResponseWriter, error)"))
 		})
 
 		It("generates the route path parameters", func() {
@@ -171,6 +221,19 @@ var _ = Describe("Generate", func() {
 
 			Ω(content).Should(ContainSubstring(`if optional != nil`))
 			Ω(content).ShouldNot(ContainSubstring(`if required != nil`))
+			Ω(content).Should(ContainSubstring(`if query != nil`))
+		})
+
+		It("properly handles headers", func() {
+			content, err := ioutil.ReadFile(filepath.Join(outDir, "app", "test", "foo_testing.go"))
+			Ω(err).ShouldNot(HaveOccurred())
+
+			Ω(content).Should(ContainSubstring(`if optionalHeader != nil`))
+			Ω(content).ShouldNot(ContainSubstring(`if requiredHeader != nil`))
+			Ω(content).Should(ContainSubstring(`req.Header["requiredHeader"] = sliceVal`))
+			Ω(content).Should(ContainSubstring(`if optionalResourceHeader != nil`))
+			Ω(content).ShouldNot(ContainSubstring(`if requiredResourceHeader != nil`))
+			Ω(content).Should(ContainSubstring(`req.Header["requiredResourceHeader"] = sliceVal`))
 		})
 
 		It("generates calls to new Context ", func() {
@@ -194,5 +257,10 @@ var _ = Describe("Generate", func() {
 			Ω(content).Should(ContainSubstring(", payload app.CustomName)"))
 		})
 
+		It("generates header compliant with https://github.com/golang/go/issues/13560", func() {
+			content, err := ioutil.ReadFile(filepath.Join(outDir, "app", "test", "foo_testing.go"))
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(strings.Split(string(content), "\n")).Should(ContainElement(MatchRegexp(`^// Code generated .* DO NOT EDIT\.$`)))
+		})
 	})
 })

@@ -2,6 +2,7 @@ package design_test
 
 import (
 	"errors"
+	"mime"
 	"sync"
 
 	. "github.com/goadesign/goa/design"
@@ -10,6 +11,68 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
+
+var _ = Describe("IsObject", func() {
+	var dt DataType
+	var isObject bool
+
+	JustBeforeEach(func() {
+		isObject = dt.IsObject()
+	})
+
+	Context("with a primitive", func() {
+		BeforeEach(func() {
+			dt = String
+		})
+
+		It("returns false", func() {
+			Ω(isObject).Should(BeFalse())
+		})
+	})
+
+	Context("with an array", func() {
+		BeforeEach(func() {
+			dt = &Array{ElemType: &AttributeDefinition{Type: String}}
+		})
+
+		It("returns false", func() {
+			Ω(isObject).Should(BeFalse())
+		})
+	})
+
+	Context("with a hash", func() {
+		BeforeEach(func() {
+			dt = &Hash{
+				KeyType:  &AttributeDefinition{Type: String},
+				ElemType: &AttributeDefinition{Type: String},
+			}
+		})
+
+		It("returns false", func() {
+			Ω(isObject).Should(BeFalse())
+		})
+	})
+
+	Context("with a nil user type type", func() {
+		BeforeEach(func() {
+			dt = &UserTypeDefinition{AttributeDefinition: &AttributeDefinition{Type: nil}}
+		})
+
+		It("returns false", func() {
+			Ω(isObject).Should(BeFalse())
+		})
+	})
+
+	Context("with an object", func() {
+		BeforeEach(func() {
+			dt = Object{}
+		})
+
+		It("returns true", func() {
+			Ω(isObject).Should(BeTrue())
+		})
+	})
+})
 
 var _ = Describe("Project", func() {
 	var mt *MediaTypeDefinition
@@ -20,6 +83,7 @@ var _ = Describe("Project", func() {
 	var prErr error
 
 	JustBeforeEach(func() {
+		ProjectedMediaTypes = make(map[string]*MediaTypeDefinition)
 		projected, links, prErr = mt.Project(view)
 	})
 
@@ -73,6 +137,19 @@ var _ = Describe("Project", func() {
 				view = "default"
 			})
 
+			It("returns a media type with an identifier view param", func() {
+				Ω(prErr).ShouldNot(HaveOccurred())
+				_, params, err := mime.ParseMediaType(projected.Identifier)
+				Ω(err).ShouldNot(HaveOccurred())
+				Ω(params).Should(HaveKeyWithValue("view", "default"))
+			})
+
+			It("returns a media type with only a default view", func() {
+				Ω(prErr).ShouldNot(HaveOccurred())
+				Ω(projected.Views).Should(HaveLen(1))
+				Ω(projected.Views).Should(HaveKey("default"))
+			})
+
 			It("returns a media type with the default view attributes", func() {
 				Ω(prErr).ShouldNot(HaveOccurred())
 				Ω(projected).ShouldNot(BeNil())
@@ -90,6 +167,19 @@ var _ = Describe("Project", func() {
 				view = "tiny"
 			})
 
+			It("returns a media type with an identifier view param", func() {
+				Ω(prErr).ShouldNot(HaveOccurred())
+				_, params, err := mime.ParseMediaType(projected.Identifier)
+				Ω(err).ShouldNot(HaveOccurred())
+				Ω(params).Should(HaveKeyWithValue("view", "tiny"))
+			})
+
+			It("returns a media type with only a default view", func() {
+				Ω(prErr).ShouldNot(HaveOccurred())
+				Ω(projected.Views).Should(HaveLen(1))
+				Ω(projected.Views).Should(HaveKey("default"))
+			})
+
 			It("returns a media type with the default view attributes", func() {
 				Ω(prErr).ShouldNot(HaveOccurred())
 				Ω(projected).ShouldNot(BeNil())
@@ -102,6 +192,51 @@ var _ = Describe("Project", func() {
 			})
 		})
 
+	})
+
+	Context("with a media type with a links attribute", func() {
+		BeforeEach(func() {
+			mt = &MediaTypeDefinition{
+				UserTypeDefinition: &UserTypeDefinition{
+					AttributeDefinition: &AttributeDefinition{
+						Type: Object{
+							"att1":  &AttributeDefinition{Type: Integer},
+							"links": &AttributeDefinition{Type: String},
+						},
+					},
+					TypeName: "Foo",
+				},
+				Identifier: "vnd.application/foo",
+				Views: map[string]*ViewDefinition{
+					"default": {
+						Name: "default",
+						AttributeDefinition: &AttributeDefinition{
+							Type: Object{
+								"att1":  &AttributeDefinition{Type: String},
+								"links": &AttributeDefinition{Type: String},
+							},
+						},
+					},
+				},
+			}
+		})
+
+		Context("using the default view", func() {
+			BeforeEach(func() {
+				view = "default"
+			})
+
+			It("uses the links attribute in the view", func() {
+				Ω(prErr).ShouldNot(HaveOccurred())
+				Ω(projected).ShouldNot(BeNil())
+				Ω(projected.Type).Should(BeAssignableToTypeOf(Object{}))
+				Ω(projected.Type.ToObject()).Should(HaveKey("links"))
+				att := projected.Type.ToObject()["links"]
+				Ω(att).ShouldNot(BeNil())
+				Ω(att.Type).ShouldNot(BeNil())
+				Ω(att.Type.Kind()).Should(Equal(StringKind))
+			})
+		})
 	})
 
 	Context("with media types with view attributes with a cyclical dependency", func() {

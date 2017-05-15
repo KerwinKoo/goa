@@ -8,6 +8,7 @@ import (
 	"github.com/goadesign/goa/dslengine"
 )
 
+// Files used in: Resource
 // Files defines an API endpoint that serves static assets. The logic for what to do when the
 // filename points to a file vs. a directory is the same as the standard http package ServeFile
 // function. The path may end with a wildcard that matches the rest of the URL (e.g. *filepath). If
@@ -41,6 +42,7 @@ func Files(path, filename string, dsls ...func()) {
 			Parent:      r,
 			RequestPath: path,
 			FilePath:    filename,
+			Metadata:    make(dslengine.MetadataDefinition),
 		}
 		if len(dsls) > 0 {
 			if !dslengine.Execute(dsls[0], server) {
@@ -51,6 +53,7 @@ func Files(path, filename string, dsls ...func()) {
 	}
 }
 
+// Action used in: Resource
 // Action implements the action definition DSL. Action definitions describe specific API endpoints
 // including the URL, HTTP method and request parameters (via path wildcards or query strings) and
 // payload (data structure describing the request HTTP body). An action belongs to a resource and
@@ -99,8 +102,9 @@ func Action(name string, dsl func()) {
 		action, ok := r.Actions[name]
 		if !ok {
 			action = &design.ActionDefinition{
-				Parent: r,
-				Name:   name,
+				Parent:   r,
+				Name:     name,
+				Metadata: make(dslengine.MetadataDefinition),
 			}
 		}
 		if !dslengine.Execute(dsl, action) {
@@ -110,6 +114,7 @@ func Action(name string, dsl func()) {
 	}
 }
 
+// Routing used in: Action
 // Routing lists the action route. Each route is defined with a function named after the HTTP method.
 // The route function takes the path as argument. Route paths may use wildcards as described in the
 // [httptreemux](https://godoc.org/github.com/dimfeld/httptreemux) package documentation. These
@@ -124,51 +129,115 @@ func Routing(routes ...*design.RouteDefinition) {
 	}
 }
 
+// GET is used as an argument to Routing
 // GET creates a route using the GET HTTP method.
-func GET(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "GET", Path: path}
+func GET(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "GET", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// HEAD is used as an argument to Routing
 // HEAD creates a route using the HEAD HTTP method.
-func HEAD(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "HEAD", Path: path}
+func HEAD(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "HEAD", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// POST is used as an argument to Routing
 // POST creates a route using the POST HTTP method.
-func POST(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "POST", Path: path}
+func POST(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "POST", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// PUT is used as an argument to Routing
 // PUT creates a route using the PUT HTTP method.
-func PUT(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "PUT", Path: path}
+func PUT(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "PUT", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// DELETE is used as an argument to Routing
 // DELETE creates a route using the DELETE HTTP method.
-func DELETE(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "DELETE", Path: path}
+func DELETE(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "DELETE", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// OPTIONS is used as an argument to Routing
 // OPTIONS creates a route using the OPTIONS HTTP method.
-func OPTIONS(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "OPTIONS", Path: path}
+func OPTIONS(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "OPTIONS", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// TRACE is used as an argument to Routing
 // TRACE creates a route using the TRACE HTTP method.
-func TRACE(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "TRACE", Path: path}
+func TRACE(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "TRACE", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// CONNECT is used as an argument to Routing
 // CONNECT creates a route using the CONNECT HTTP method.
-func CONNECT(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "CONNECT", Path: path}
+func CONNECT(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "CONNECT", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// PATCH is used as an argument to Routing
 // PATCH creates a route using the PATCH HTTP method.
-func PATCH(path string) *design.RouteDefinition {
-	return &design.RouteDefinition{Verb: "PATCH", Path: path}
+func PATCH(path string, dsl ...func()) *design.RouteDefinition {
+	route := &design.RouteDefinition{Verb: "PATCH", Path: path}
+	if len(dsl) != 0 {
+		if !dslengine.Execute(dsl[0], route) {
+			return nil
+		}
+	}
+	return route
 }
 
+// Headers can be used in: Action, Response, Resource
 // Headers implements the DSL for describing HTTP headers. The DSL syntax is identical to the one
 // of Attribute. Here is an example defining a couple of headers with validations:
 //
@@ -237,6 +306,7 @@ func Headers(params ...interface{}) {
 	}
 }
 
+// Params can be used in: Action, Resource, API
 // Params describe the action parameters, either path parameters identified via wildcards or query
 // string parameters if there is no corresponding path parameter. Each parameter is described via
 // the Param function which uses the same DSL as the Attribute DSL. Here is an example:
@@ -288,6 +358,7 @@ func Params(dsl func()) {
 		params = new(design.AttributeDefinition)
 	default:
 		dslengine.IncompatibleDSL()
+		return
 	}
 	params.Type = make(design.Object)
 	if !dslengine.Execute(dsl, params) {
@@ -303,6 +374,7 @@ func Params(dsl func()) {
 	}
 }
 
+// Payload can be used in: Action
 // Payload implements the action payload DSL. An action payload describes the HTTP request body
 // data structure. The function accepts either a type or a DSL that describes the payload members
 // using the Member DSL which accepts the same syntax as the Attribute DSL. This function can be
@@ -322,6 +394,7 @@ func Payload(p interface{}, dsls ...func()) {
 	payload(false, p, dsls...)
 }
 
+// OptionalPayload can be used in: Action
 // OptionalPayload implements the action optional payload DSL. The function works identically to the
 // Payload DSL except it sets a bit in the action definition to denote that the payload is not
 // required. Example:
@@ -347,8 +420,15 @@ func payload(isOptional bool, p interface{}, dsls ...func()) {
 			att.Type = design.Object{}
 		case *design.AttributeDefinition:
 			att = design.DupAtt(actual)
-		case design.DataStructure:
+		case *design.UserTypeDefinition:
+			if len(dsls) == 0 {
+				a.Payload = actual
+				a.PayloadOptional = isOptional
+				return
+			}
 			att = design.DupAtt(actual.Definition())
+		case *design.MediaTypeDefinition:
+			att = design.DupAtt(actual.AttributeDefinition)
 		case string:
 			ut, ok := design.Design.Types[actual]
 			if !ok {

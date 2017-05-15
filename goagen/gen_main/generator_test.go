@@ -52,8 +52,83 @@ var _ = Describe("Generate", func() {
 			content, err := ioutil.ReadFile(filepath.Join(outDir, "main.go"))
 			Ω(err).ShouldNot(HaveOccurred())
 			Ω(len(strings.Split(string(content), "\n"))).Should(BeNumerically(">=", 16))
+			Ω(string(content)).Should(ContainSubstring(listenAndServeCode))
 			_, err = gexec.Build(testgenPackagePath)
 			Ω(err).ShouldNot(HaveOccurred())
 		})
+
+		Context("via HTTPS", func() {
+			BeforeEach(func() {
+				design.Design.Schemes = []string{"https"}
+			})
+
+			It("generates a dummy app", func() {
+				Ω(genErr).Should(BeNil())
+				Ω(files).Should(HaveLen(1))
+				content, err := ioutil.ReadFile(filepath.Join(outDir, "main.go"))
+				Ω(err).ShouldNot(HaveOccurred())
+				Ω(len(strings.Split(string(content), "\n"))).Should(BeNumerically(">=", 16))
+				Ω(string(content)).Should(ContainSubstring(listenAndServeTLSCode))
+				_, err = gexec.Build(testgenPackagePath)
+				Ω(err).ShouldNot(HaveOccurred())
+			})
+
+		})
 	})
 })
+
+var _ = Describe("NewGenerator", func() {
+	var generator *genmain.Generator
+
+	var args = struct {
+		api       *design.APIDefinition
+		outDir    string
+		designPkg string
+		target    string
+		force     bool
+		noExample bool
+	}{
+		api: &design.APIDefinition{
+			Name: "test api",
+		},
+		outDir:    "out_dir",
+		designPkg: "design",
+		target:    "app",
+		force:     false,
+	}
+
+	Context("with options all options set", func() {
+		BeforeEach(func() {
+
+			generator = genmain.NewGenerator(
+				genmain.API(args.api),
+				genmain.OutDir(args.outDir),
+				genmain.DesignPkg(args.designPkg),
+				genmain.Target(args.target),
+				genmain.Force(args.force),
+			)
+		})
+
+		It("has all public properties set with expected value", func() {
+			Ω(generator).ShouldNot(BeNil())
+			Ω(generator.API.Name).Should(Equal(args.api.Name))
+			Ω(generator.OutDir).Should(Equal(args.outDir))
+			Ω(generator.DesignPkg).Should(Equal(args.designPkg))
+			Ω(generator.Target).Should(Equal(args.target))
+			Ω(generator.Force).Should(Equal(args.force))
+		})
+
+	})
+})
+
+const listenAndServeCode = `
+	if err := service.ListenAndServe(":8080"); err != nil {
+		service.LogError("startup", "err", err)
+	}
+`
+
+const listenAndServeTLSCode = `
+	if err := service.ListenAndServeTLS(":8080", "cert.pem", "key.pem"); err != nil {
+		service.LogError("startup", "err", err)
+	}
+`

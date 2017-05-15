@@ -24,6 +24,8 @@ type (
 		CtxNewTmpl  *template.Template
 		CtxRespTmpl *template.Template
 		PayloadTmpl *template.Template
+		Finalizer   *codegen.Finalizer
+		Validator   *codegen.Validator
 	}
 
 	// ControllersWriter generate code for a goa application handlers.
@@ -34,6 +36,8 @@ type (
 		CtrlTmpl    *template.Template
 		MountTmpl   *template.Template
 		handleCORST *template.Template
+		Finalizer   *codegen.Finalizer
+		Validator   *codegen.Validator
 	}
 
 	// SecurityWriter generate code for action-level security handlers.
@@ -55,6 +59,7 @@ type (
 	MediaTypesWriter struct {
 		*codegen.SourceFile
 		MediaTypeTmpl *template.Template
+		Validator     *codegen.Validator
 	}
 
 	// UserTypesWriter generate code for a goa application user types.
@@ -62,6 +67,8 @@ type (
 	UserTypesWriter struct {
 		*codegen.SourceFile
 		UserTypeTmpl *template.Template
+		Finalizer    *codegen.Finalizer
+		Validator    *codegen.Validator
 	}
 
 	// ContextTemplateData contains all the information used by the template to render the context
@@ -84,7 +91,7 @@ type (
 	ControllerTemplateData struct {
 		API            *design.APIDefinition          // API definition
 		Resource       string                         // Lower case plural resource name, e.g. "bottles"
-		Actions        []map[string]interface{}       // Array of actions, each action has keys "Name", "Routes", "Context" and "Unmarshal"
+		Actions        []map[string]interface{}       // Array of actions, each action has keys "Name", "DesignName", "Routes", "Context" and "Unmarshal"
 		FileServers    []*design.FileServerDefinition // File servers
 		Encoders       []*EncoderTemplateData         // Encoder data
 		Decoders       []*EncoderTemplateData         // Decoder data
@@ -190,7 +197,11 @@ func NewContextsWriter(filename string) (*ContextsWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ContextsWriter{SourceFile: file}, nil
+	return &ContextsWriter{
+		SourceFile: file,
+		Finalizer:  codegen.NewFinalizer(),
+		Validator:  codegen.NewValidator(),
+	}, nil
 }
 
 // Execute writes the code for the context types to the writer.
@@ -201,14 +212,28 @@ func (w *ContextsWriter) Execute(data *ContextTemplateData) error {
 	fn := template.FuncMap{
 		"newCoerceData":      newCoerceData,
 		"arrayAttribute":     arrayAttribute,
+		"printVal":           codegen.PrintVal,
 		"canonicalHeaderKey": http.CanonicalHeaderKey,
 	}
 	if err := w.ExecuteTemplate("new", ctxNewT, fn, data); err != nil {
 		return err
 	}
 	if data.Payload != nil {
-		if err := w.ExecuteTemplate("payload", payloadT, nil, data); err != nil {
-			return err
+		found := false
+		for _, t := range design.Design.Types {
+			if t.TypeName == data.Payload.TypeName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fn := template.FuncMap{
+				"finalizeCode":   w.Finalizer.Code,
+				"validationCode": w.Validator.Code,
+			}
+			if err := w.ExecuteTemplate("payload", payloadT, fn, data); err != nil {
+				return err
+			}
 		}
 	}
 	return data.IterateResponses(func(resp *design.ResponseDefinition) error {
@@ -272,7 +297,11 @@ func NewControllersWriter(filename string) (*ControllersWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ControllersWriter{SourceFile: file}, nil
+	return &ControllersWriter{
+		SourceFile: file,
+		Finalizer:  codegen.NewFinalizer(),
+		Validator:  codegen.NewValidator(),
+	}, nil
 }
 
 // WriteInitService writes the initService function
@@ -305,7 +334,11 @@ func (w *ControllersWriter) Execute(data []*ControllerTemplateData) error {
 				return err
 			}
 		}
-		if err := w.ExecuteTemplate("unmarshal", unmarshalT, nil, d); err != nil {
+		fn := template.FuncMap{
+			"finalizeCode":   w.Finalizer.Code,
+			"validationCode": w.Validator.Code,
+		}
+		if err := w.ExecuteTemplate("unmarshal", unmarshalT, fn, d); err != nil {
 			return err
 		}
 	}
@@ -349,13 +382,15 @@ func NewMediaTypesWriter(filename string) (*MediaTypesWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &MediaTypesWriter{SourceFile: file}, nil
+	return &MediaTypesWriter{SourceFile: file, Validator: codegen.NewValidator()}, nil
 }
 
 // Execute writes the code for the context types to the writer.
 func (w *MediaTypesWriter) Execute(mt *design.MediaTypeDefinition) error {
-	var mLinks *design.UserTypeDefinition
-	viewMT := mt
+	var (
+		mLinks *design.UserTypeDefinition
+		fn     = template.FuncMap{"validationCode": w.Validator.Code}
+	)
 	err := mt.IterateViews(func(view *design.ViewDefinition) error {
 		p, links, err := mt.Project(view.Name)
 		if mLinks == nil {
@@ -364,8 +399,7 @@ func (w *MediaTypesWriter) Execute(mt *design.MediaTypeDefinition) error {
 		if err != nil {
 			return err
 		}
-		viewMT = p
-		if err := w.ExecuteTemplate("mediatype", mediaTypeT, nil, viewMT); err != nil {
+		if err := w.ExecuteTemplate("mediatype", mediaTypeT, fn, p); err != nil {
 			return err
 		}
 		return nil
@@ -374,7 +408,7 @@ func (w *MediaTypesWriter) Execute(mt *design.MediaTypeDefinition) error {
 		return err
 	}
 	if mLinks != nil {
-		if err := w.ExecuteTemplate("mediatypelink", mediaTypeLinkT, nil, mLinks); err != nil {
+		if err := w.ExecuteTemplate("mediatypelink", mediaTypeLinkT, fn, mLinks); err != nil {
 			return err
 		}
 	}
@@ -388,12 +422,20 @@ func NewUserTypesWriter(filename string) (*UserTypesWriter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &UserTypesWriter{SourceFile: file}, nil
+	return &UserTypesWriter{
+		SourceFile: file,
+		Finalizer:  codegen.NewFinalizer(),
+		Validator:  codegen.NewValidator(),
+	}, nil
 }
 
 // Execute writes the code for the context types to the writer.
 func (w *UserTypesWriter) Execute(t *design.UserTypeDefinition) error {
-	return w.ExecuteTemplate("types", userTypeT, nil, t)
+	fn := template.FuncMap{
+		"finalizeCode":   w.Finalizer.Code,
+		"validationCode": w.Validator.Code,
+	}
+	return w.ExecuteTemplate("types", userTypeT, fn, t)
 }
 
 // newCoerceData is a helper function that creates a map that can be given to the "Coerce" template.
@@ -500,11 +542,12 @@ type {{ .Name }} struct {
 	ctxNewT = `{{ define "Coerce" }}` + coerceT + `{{ end }}` + `
 // New{{ goify .Name true }} parses the incoming request URL and body, performs validations and creates the
 // context used by the {{ .ResourceName }} controller {{ .ActionName }} action.
-func New{{ .Name }}(ctx context.Context, service *goa.Service) (*{{ .Name }}, error) {
+func New{{ .Name }}(ctx context.Context, r *http.Request, service *goa.Service) (*{{ .Name }}, error) {
 	var err error
 	resp := goa.ContextResponse(ctx)
 	resp.Service = service
 	req := goa.ContextRequest(ctx)
+	req.Request = r
 	rctx := {{ .Name }}{Context: ctx, ResponseData: resp, RequestData: req}{{/*
 */}}
 {{ if .Headers }}{{ range $name, $att := .Headers.Type.ToObject }}	header{{ goify $name true }} := req.Header["{{ canonicalHeaderKey $name }}"]
@@ -529,10 +572,14 @@ func New{{ .Name }}(ctx context.Context, service *goa.Service) (*{{ .Name }}, er
 
 */}}{{ if.Params }}{{ range $name, $att := .Params.Type.ToObject }}	param{{ goify $name true }} := req.Params["{{ $name }}"]
 {{ $mustValidate := $.MustValidate $name }}{{ if $mustValidate }}	if len(param{{ goify $name true }}) == 0 {
-		err = goa.MergeErrors(err, goa.MissingParamError("{{ $name }}"))
+		{{ if $.Params.HasDefaultValue $name }}{{printf "rctx.%s" (goifyatt $att $name true) }} = {{ printVal $att.Type $att.DefaultValue }}{{else}}{{/*
+*/}}err = goa.MergeErrors(err, goa.MissingParamError("{{ $name }}")){{end}}
+	} else {
+{{ else }}{{ if $.Params.HasDefaultValue $name }}	if len(param{{ goify $name true }}) == 0 {
+		{{printf "rctx.%s" (goifyatt $att $name true) }} = {{ printVal $att.Type $att.DefaultValue }}
 	} else {
 {{ else }}	if len(param{{ goify $name true }}) > 0 {
-{{ end }}{{/* if $mustValidate */}}{{ if $att.Type.IsArray }}{{ if eq (arrayAttribute $att).Type.Kind 4 }}		params := param{{ goify $name true }}
+{{ end }}{{ end }}{{/* if $mustValidate */}}{{ if $att.Type.IsArray }}{{ if eq (arrayAttribute $att).Type.Kind 4 }}		params := param{{ goify $name true }}
 {{ else }}		params := make({{ gotypedef $att 2 true false }}, len(param{{ goify $name true }}))
 		for i, raw{{ goify $name true}} := range param{{ goify $name true}} {
 {{ template "Coerce" (newCoerceData $name (arrayAttribute $att) ($.Params.IsPrimitivePointer $name) "params[i]" 3) }}{{/*
@@ -551,8 +598,11 @@ func New{{ .Name }}(ctx context.Context, service *goa.Service) (*{{ .Name }}, er
 	// template input: map[string]interface{}
 	ctxMTRespT = `// {{ goify .RespName true }} sends a HTTP response with status code {{ .Response.Status }}.
 func (ctx *{{ .Context.Name }}) {{ goify .RespName true }}(r {{ gotyperef .Projected .Projected.AllRequired 0 false }}) error {
-	ctx.ResponseData.Header().Set("Content-Type", "{{ .Response.MediaType }}")
-	return ctx.ResponseData.Service.Send(ctx.Context, {{ .Response.Status }}, r)
+	ctx.ResponseData.Header().Set("Content-Type", "{{ .ContentType }}")
+{{ if .Projected.Type.IsArray }}	if r == nil {
+		r = {{ gotyperef .Projected .Projected.AllRequired 0 false }}{}
+	}
+{{ end }}	return ctx.ResponseData.Service.Send(ctx.Context, {{ .Response.Status }}, r)
 }
 `
 
@@ -584,12 +634,12 @@ func (ctx *{{ .Context.Name }}) {{ goify .Response.Name true }}({{ if .Response.
 */}}{{ $privateTypeName := gotypename .Payload nil 1 true }}
 type {{ $privateTypeName }} {{ gotypedef .Payload 0 true true }}
 
-{{ $assignment := recursiveFinalizer .Payload.AttributeDefinition "payload" 1 }}{{ if $assignment }}// Finalize sets the default values defined in the design.
+{{ $assignment := finalizeCode .Payload.AttributeDefinition "payload" 1 }}{{ if $assignment }}// Finalize sets the default values defined in the design.
 func (payload {{ gotyperef .Payload .Payload.AllRequired 0 true }}) Finalize() {
 {{ $assignment }}
 }{{ end }}
 
-{{ $validation := recursiveValidate .Payload.AttributeDefinition false false false "payload" "raw" 1 true }}{{ if $validation }}// Validate runs the validation rules defined in the design.
+{{ $validation := validationCode .Payload.AttributeDefinition false false false "payload" "raw" 1 true }}{{ if $validation }}// Validate runs the validation rules defined in the design.
 func (payload {{ gotyperef .Payload .Payload.AllRequired 0 true }}) Validate() (err error) {
 {{ $validation }}
 	return
@@ -605,7 +655,7 @@ func (payload {{ gotyperef .Payload .Payload.AllRequired 0 true }}) Publicize() 
 // {{ gotypename .Payload nil 0 false }} is the {{ .ResourceName }} {{ .ActionName }} action payload.
 type {{ gotypename .Payload nil 1 false }} {{ gotypedef .Payload 0 true false }}
 
-{{ $validation := recursiveValidate .Payload.AttributeDefinition false false false "payload" "raw" 1 false }}{{ if $validation }}// Validate runs the validation rules defined in the design.
+{{ $validation := validationCode .Payload.AttributeDefinition false false false "payload" "raw" 1 false }}{{ if $validation }}// Validate runs the validation rules defined in the design.
 func (payload {{ gotyperef .Payload .Payload.AllRequired 0 false }}) Validate() (err error) {
 {{ $validation }}
 	return
@@ -649,7 +699,7 @@ func Mount{{ .Resource }}Controller(service *goa.Service, ctrl {{ .Resource }}Co
 	initService(service)
 	var h goa.Handler
 {{ $res := .Resource }}{{ if .Origins }}{{ range .PreflightPaths }}{{/*
-*/}}	service.Mux.Handle("OPTIONS", "{{ . }}", ctrl.MuxHandler("preflight", handle{{ $res }}Origin(cors.HandlePreflight()), nil))
+*/}}	service.Mux.Handle("OPTIONS", {{ printf "%q" . }}, ctrl.MuxHandler("preflight", handle{{ $res }}Origin(cors.HandlePreflight()), nil))
 {{ end }}{{ end }}{{ range .Actions }}{{ $action := . }}
 	h = func(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
 		// Check if there was an error loading the request
@@ -657,7 +707,7 @@ func Mount{{ .Resource }}Controller(service *goa.Service, ctrl {{ .Resource }}Co
 			return err
 		}
 		// Build the context
-		rctx, err := New{{ .Context }}(ctx, service)
+		rctx, err := New{{ .Context }}(ctx, req, service)
 		if err != nil {
 			return err
 		}
@@ -669,14 +719,14 @@ func Mount{{ .Resource }}Controller(service *goa.Service, ctrl {{ .Resource }}Co
 {{ end }}		}
 {{ end }}		return ctrl.{{ .Name }}(rctx)
 	}
-{{ if $.Origins }}	h = handle{{ $res }}Origin(h)
-{{ end }}{{ if .Security }}	h = handleSecurity({{ printf "%q" .Security.Scheme.SchemeName }}, h{{ range .Security.Scopes }}, {{ printf "%q" . }}{{ end }})
-{{ end }}{{ range .Routes }}	service.Mux.Handle("{{ .Verb }}", {{ printf "%q" .FullPath }}, ctrl.MuxHandler({{ printf "%q" $action.Name }}, h, {{ if $action.Payload }}{{ $action.Unmarshal }}{{ else }}nil{{ end }}))
+{{ if .Security }}	h = handleSecurity({{ printf "%q" .Security.Scheme.SchemeName }}, h{{ range .Security.Scopes }}, {{ printf "%q" . }}{{ end }})
+{{ end }}{{ if $.Origins }}	h = handle{{ $res }}Origin(h)
+{{ end }}{{ range .Routes }}	service.Mux.Handle("{{ .Verb }}", {{ printf "%q" .FullPath }}, ctrl.MuxHandler({{ printf "%q" $action.DesignName }}, h, {{ if $action.Payload }}{{ $action.Unmarshal }}{{ else }}nil{{ end }}))
 	service.LogInfo("mount", "ctrl", {{ printf "%q" $res }}, "action", {{ printf "%q" $action.Name }}, "route", {{ printf "%q" (printf "%s %s" .Verb .FullPath) }}{{ with $action.Security }}, "security", {{ printf "%q" .Scheme.SchemeName }}{{ end }})
 {{ end }}{{ end }}{{ range .FileServers }}
 	h = ctrl.FileHandler({{ printf "%q" .RequestPath }}, {{ printf "%q" .FilePath }})
-{{ if $.Origins }}	h = handle{{ $res }}Origin(h)
-{{ end }}{{ if .Security }}	h = handleSecurity({{ printf "%q" .Security.Scheme.SchemeName }}, h{{ range .Security.Scopes }}, {{ printf "%q" . }}{{ end }})
+{{ if .Security }}	h = handleSecurity({{ printf "%q" .Security.Scheme.SchemeName }}, h{{ range .Security.Scopes }}, {{ printf "%q" . }}{{ end }})
+{{ end }}{{ if $.Origins }}	h = handle{{ $res }}Origin(h)
 {{ end }}	service.Mux.Handle("GET", "{{ .RequestPath }}", ctrl.MuxHandler("serve", h, nil))
 	service.LogInfo("mount", "ctrl", {{ printf "%q" $res }}, "files", {{ printf "%q" .FilePath }}, "route", {{ printf "%q" (printf "GET %s" .RequestPath) }}{{ with .Security }}, "security", {{ printf "%q" .Scheme.SchemeName }}{{ end }})
 {{ end }}}
@@ -686,15 +736,17 @@ func Mount{{ .Resource }}Controller(service *goa.Service, ctrl {{ .Resource }}Co
 	// template input: *ControllerTemplateData
 	handleCORST = `// handle{{ .Resource }}Origin applies the CORS response headers corresponding to the origin.
 func handle{{ .Resource }}Origin(h goa.Handler) goa.Handler {
+{{ range $i, $policy := .Origins }}{{ if $policy.Regexp }}	spec{{$i}} := regexp.MustCompile({{ printf "%q" $policy.Origin }})
+{{ end }}{{ end }}
 	return func(ctx context.Context, rw http.ResponseWriter, req *http.Request) error {
 		origin := req.Header.Get("Origin")
 		if origin == "" {
 			// Not a CORS request
 			return h(ctx, rw, req)
 		}
-{{ range $policy := .Origins }}		if cors.MatchOrigin(origin, {{ printf "%q" $policy.Origin }}) {
+{{ range $i, $policy := .Origins }}		{{ if $policy.Regexp }}if cors.MatchOriginRegexp(origin, spec{{$i}}){{else}}if cors.MatchOrigin(origin, {{ printf "%q" $policy.Origin }}){{end}} {
 			ctx = goa.WithLogContext(ctx, "origin", origin)
-			rw.Header().Set("Access-Control-Allow-Origin", "{{ $policy.Origin }}")
+			rw.Header().Set("Access-Control-Allow-Origin", origin)
 {{ if not (eq $policy.Origin "*") }}			rw.Header().Set("Vary", "Origin")
 {{ end }}{{ if $policy.Exposed }}			rw.Header().Set("Access-Control-Expose-Headers", "{{ join $policy.Exposed ", " }}")
 {{ end }}{{ if gt $policy.MaxAge 0 }}			rw.Header().Set("Access-Control-Max-Age", "{{ $policy.MaxAge }}")
@@ -720,12 +772,14 @@ func {{ .Unmarshal }}(ctx context.Context, service *goa.Service, req *http.Reque
 	{{ if .Payload.IsObject }}payload := &{{ gotypename .Payload nil 1 true }}{}
 	if err := service.DecodeRequest(req, payload); err != nil {
 		return err
-	}{{ $assignment := recursiveFinalizer .Payload.AttributeDefinition "payload" 1 }}{{ if $assignment }}
+	}{{ $assignment := finalizeCode .Payload.AttributeDefinition "payload" 1 }}{{ if $assignment }}
 	payload.Finalize(){{ end }}{{ else }}var payload {{ gotypename .Payload nil 1 false }}
 	if err := service.DecodeRequest(req, &payload); err != nil {
 		return err
-	}{{ end }}{{ $validation := recursiveValidate .Payload.AttributeDefinition false false false "payload" "raw" 1 false }}{{ if $validation }}
+	}{{ end }}{{ $validation := validationCode .Payload.AttributeDefinition false false false "payload" "raw" 1 false }}{{ if $validation }}
 	if err := payload.Validate(); err != nil {
+		// Initialize payload with private data structure so it can be logged
+		goa.ContextRequest(ctx).Payload = payload
 		return err
 	}{{ end }}
 	goa.ContextRequest(ctx).Payload = payload{{ if .Payload.IsObject }}.Publicize(){{ end }}
@@ -738,8 +792,10 @@ func {{ .Unmarshal }}(ctx context.Context, service *goa.Service, req *http.Reque
 	// template input: *ResourceData
 	resourceT = `{{ if .CanonicalTemplate }}// {{ .Name }}Href returns the resource href.
 func {{ .Name }}Href({{ if .CanonicalParams }}{{ join .CanonicalParams ", " }} interface{}{{ end }}) string {
-	return fmt.Sprintf("{{ .CanonicalTemplate }}", {{ join .CanonicalParams ", " }})
-}
+{{ range $param := .CanonicalParams }}	param{{$param}} := strings.TrimLeftFunc(fmt.Sprintf("%v", {{$param}}), func(r rune) bool { return r == '/' })
+{{ end }}{{ if .CanonicalParams }}	return fmt.Sprintf("{{ .CanonicalTemplate }}", param{{ join .CanonicalParams ", param" }})
+{{ else }}	return "{{ .CanonicalTemplate }}"
+{{ end }}}
 {{ end }}`
 
 	// mediaTypeT generates the code for a media type.
@@ -749,7 +805,7 @@ func {{ .Name }}Href({{ if .CanonicalParams }}{{ join .CanonicalParams ", " }} i
 // Identifier: {{ .Identifier }}{{ $typeName := gotypename . .AllRequired 0 false }}
 type {{ $typeName }} {{ gotypedef . 0 true false }}
 
-{{ $validation := recursiveValidate .AttributeDefinition false false false "mt" "response" 1 false }}{{ if $validation }}// Validate validates the {{$typeName}} media type instance.
+{{ $validation := validationCode .AttributeDefinition false false false "mt" "response" 1 false }}{{ if $validation }}// Validate validates the {{$typeName}} media type instance.
 func (mt {{ gotyperef . .AllRequired 0 false }}) Validate() (err error) {
 {{ $validation }}
 	return
@@ -761,7 +817,7 @@ func (mt {{ gotyperef . .AllRequired 0 false }}) Validate() (err error) {
 	// template input: MediaTypeLinkTemplateData
 	mediaTypeLinkT = `// {{ gotypedesc . true }}{{ $typeName := gotypename . .AllRequired 0 false }}
 type {{ $typeName }} {{ gotypedef . 0 true false }}
-{{ $validation := recursiveValidate .AttributeDefinition false false false "ut" "response" 1 false }}{{ if $validation }}// Validate validates the {{$typeName}} type instance.
+{{ $validation := validationCode .AttributeDefinition false false false "ut" "response" 1 false }}{{ if $validation }}// Validate validates the {{$typeName}} type instance.
 func (ut {{ gotyperef . .AllRequired 0 false }}) Validate() (err error) {
 {{ $validation }}
 	return
@@ -772,11 +828,11 @@ func (ut {{ gotyperef . .AllRequired 0 false }}) Validate() (err error) {
 	// template input: UserTypeTemplateData
 	userTypeT = `// {{ gotypedesc . false }}{{ $privateTypeName := gotypename . .AllRequired 0 true }}
 type {{ $privateTypeName }} {{ gotypedef . 0 true true }}
-{{ $assignment := recursiveFinalizer .AttributeDefinition "ut" 1 }}{{ if $assignment }}// Finalize sets the default values for {{$privateTypeName}} type instance.
+{{ $assignment := finalizeCode .AttributeDefinition "ut" 1 }}{{ if $assignment }}// Finalize sets the default values for {{$privateTypeName}} type instance.
 func (ut {{ gotyperef . .AllRequired 0 true }}) Finalize() {
 {{ $assignment }}
 }{{ end }}
-{{ $validation := recursiveValidate .AttributeDefinition false false false "ut" "response" 1 true }}{{ if $validation }}// Validate validates the {{$privateTypeName}} type instance.
+{{ $validation := validationCode .AttributeDefinition false false false "ut" "response" 1 true }}{{ if $validation }}// Validate validates the {{$privateTypeName}} type instance.
 func (ut {{ gotyperef . .AllRequired 0 true }}) Validate() (err error) {
 {{ $validation }}
 	return
@@ -791,7 +847,7 @@ func (ut {{ gotyperef . .AllRequired 0 true }}) Publicize() {{ gotyperef . .AllR
 
 // {{ gotypedesc . true }}
 type {{ $typeName }} {{ gotypedef . 0 true false }}
-{{ $validation := recursiveValidate .AttributeDefinition false false false "ut" "response" 1 false }}{{ if $validation }}// Validate validates the {{$typeName}} type instance.
+{{ $validation := validationCode .AttributeDefinition false false false "ut" "response" 1 false }}{{ if $validation }}// Validate validates the {{$typeName}} type instance.
 func (ut {{ gotyperef . .AllRequired 0 false }}) Validate() (err error) {
 {{ $validation }}
 	return

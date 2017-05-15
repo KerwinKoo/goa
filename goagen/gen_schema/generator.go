@@ -2,6 +2,7 @@ package genschema
 
 import (
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -11,10 +12,22 @@ import (
 	"github.com/goadesign/goa/goagen/utils"
 )
 
+//NewGenerator returns an initialized instance of a JavaScript Client Generator
+func NewGenerator(options ...Option) *Generator {
+	g := &Generator{}
+
+	for _, option := range options {
+		option(g)
+	}
+
+	return g
+}
+
 // Generator is the application code generator.
 type Generator struct {
-	genfiles []string // Generated files
-	outDir   string   // Path to output directory
+	API      *design.APIDefinition // The API definition
+	OutDir   string                // Path to output directory
+	genfiles []string              // Generated files
 }
 
 // Generate is the generator entry point called by the meta generator.
@@ -26,19 +39,21 @@ func Generate() (files []string, err error) {
 	set.String("design", "", "")
 	set.Parse(os.Args[1:])
 
-	// First check compatibility
 	if err := codegen.CheckVersion(ver); err != nil {
 		return nil, err
 	}
 
-	// Now proceed
-	g := &Generator{outDir: outDir}
+	g := &Generator{OutDir: outDir, API: design.Design}
 
-	return g.Generate(design.Design)
+	return g.Generate()
 }
 
 // Generate produces the skeleton main.
-func (g *Generator) Generate(api *design.APIDefinition) (_ []string, err error) {
+func (g *Generator) Generate() (_ []string, err error) {
+	if g.API == nil {
+		return nil, fmt.Errorf("missing API definition, make sure design is properly initialized")
+	}
+
 	go utils.Catch(nil, func() { g.Cleanup() })
 
 	defer func() {
@@ -47,17 +62,17 @@ func (g *Generator) Generate(api *design.APIDefinition) (_ []string, err error) 
 		}
 	}()
 
-	s := APISchema(api)
+	s := APISchema(g.API)
 	js, err := s.JSON()
 	if err != nil {
 		return
 	}
 
-	g.outDir = filepath.Join(g.outDir, "schema")
-	os.RemoveAll(g.outDir)
-	os.MkdirAll(g.outDir, 0755)
-	g.genfiles = append(g.genfiles, g.outDir)
-	schemaFile := filepath.Join(g.outDir, "schema.json")
+	g.OutDir = filepath.Join(g.OutDir, "schema")
+	os.RemoveAll(g.OutDir)
+	os.MkdirAll(g.OutDir, 0755)
+	g.genfiles = append(g.genfiles, g.OutDir)
+	schemaFile := filepath.Join(g.OutDir, "schema.json")
 	if err = ioutil.WriteFile(schemaFile, js, 0644); err != nil {
 		return
 	}

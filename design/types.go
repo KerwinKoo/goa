@@ -11,6 +11,7 @@ package design
 
 import (
 	"fmt"
+	"mime"
 	"reflect"
 	"sort"
 	"strings"
@@ -20,6 +21,11 @@ import (
 	"github.com/satori/go.uuid"
 )
 
+// DefaultView is the name of the default view.
+const DefaultView = "default"
+
+// It returns the default view - or if not available the link view - or if not available the first
+// view by alphabetical order.
 type (
 	// A Kind defines the JSON type that a DataType represents.
 	Kind uint
@@ -234,7 +240,7 @@ func (p Primitive) ToHash() *Hash { return nil }
 // CanHaveDefault returns whether the primitive can have a default value.
 func (p Primitive) CanHaveDefault() (ok bool) {
 	switch p {
-	case Boolean, Integer, Number, String:
+	case Boolean, Integer, Number, String, DateTime:
 		ok = true
 	}
 	return
@@ -345,7 +351,8 @@ func (a *Array) IsCompatible(val interface{}) bool {
 	}
 	v := reflect.ValueOf(val)
 	for i := 0; i < v.Len(); i++ {
-		if !a.ElemType.Type.IsCompatible(v.Index(i).Interface()) {
+		compat := (a.ElemType.Type != nil) && a.ElemType.Type.IsCompatible(v.Index(i).Interface())
+		if !compat {
 			return false
 		}
 	}
@@ -483,7 +490,9 @@ func (h *Hash) IsCompatible(val interface{}) bool {
 	}
 	v := reflect.ValueOf(val)
 	for _, key := range v.MapKeys() {
-		if !h.KeyType.Type.IsCompatible(key.Interface()) || !h.ElemType.Type.IsCompatible(v.MapIndex(key).Interface()) {
+		keyCompat := h.KeyType.Type == nil || h.KeyType.Type.IsCompatible(key.Interface())
+		elemCompat := h.ElemType.Type == nil || h.ElemType.Type.IsCompatible(v.MapIndex(key).Interface())
+		if !keyCompat || !elemCompat {
 			return false
 		}
 	}
@@ -630,19 +639,19 @@ func (u *UserTypeDefinition) Kind() Kind { return UserTypeKind }
 func (u *UserTypeDefinition) Name() string { return u.Type.Name() }
 
 // IsPrimitive calls IsPrimitive on the user type underlying data type.
-func (u *UserTypeDefinition) IsPrimitive() bool { return u.Type.IsPrimitive() }
+func (u *UserTypeDefinition) IsPrimitive() bool { return u.Type != nil && u.Type.IsPrimitive() }
 
 // HasAttributes calls the HasAttributes on the user type underlying data type.
 func (u *UserTypeDefinition) HasAttributes() bool { return u.Type.HasAttributes() }
 
 // IsObject calls IsObject on the user type underlying data type.
-func (u *UserTypeDefinition) IsObject() bool { return u.Type.IsObject() }
+func (u *UserTypeDefinition) IsObject() bool { return u.Type != nil && u.Type.IsObject() }
 
 // IsArray calls IsArray on the user type underlying data type.
-func (u *UserTypeDefinition) IsArray() bool { return u.Type.IsArray() }
+func (u *UserTypeDefinition) IsArray() bool { return u.Type != nil && u.Type.IsArray() }
 
 // IsHash calls IsHash on the user type underlying data type.
-func (u *UserTypeDefinition) IsHash() bool { return u.Type.IsHash() }
+func (u *UserTypeDefinition) IsHash() bool { return u.Type != nil && u.Type.IsHash() }
 
 // ToObject calls ToObject on the user type underlying data type.
 func (u *UserTypeDefinition) ToObject() Object { return u.Type.ToObject() }
@@ -656,9 +665,9 @@ func (u *UserTypeDefinition) ToHash() *Hash { return u.Type.ToHash() }
 // CanHaveDefault calls CanHaveDefault on the user type underlying data type.
 func (u *UserTypeDefinition) CanHaveDefault() bool { return u.Type.CanHaveDefault() }
 
-// IsCompatible returns true if val is compatible with p.
+// IsCompatible returns true if val is compatible with u.
 func (u *UserTypeDefinition) IsCompatible(val interface{}) bool {
-	return u.Type.IsCompatible(val)
+	return u.Type == nil || u.Type.IsCompatible(val)
 }
 
 // Finalize merges base type attributes.
@@ -689,7 +698,12 @@ func (m *MediaTypeDefinition) Kind() Kind { return MediaTypeKind }
 
 // IsError returns true if the media type is implemented via a goa struct.
 func (m *MediaTypeDefinition) IsError() bool {
-	return m.Identifier == ErrorMedia.Identifier
+	base, params, err := mime.ParseMediaType(m.Identifier)
+	if err != nil {
+		panic("invalid media type identifier " + m.Identifier) // bug
+	}
+	delete(params, "view")
+	return mime.FormatMediaType(base, params) == ErrorMedia.Identifier
 }
 
 // ComputeViews returns the media type views recursing as necessary if the media type is a
@@ -739,61 +753,34 @@ func (m *MediaTypeDefinition) IterateViews(it ViewIterator) error {
 	return nil
 }
 
-// Project creates a MediaTypeDefinition derived from the given definition that matches the given
-// view. links is a user type of type Object where each key corresponds to a linked media type as
-// defined by the media type "links" attribute.
-func (m *MediaTypeDefinition) Project(view string) (p *MediaTypeDefinition, links *UserTypeDefinition, err error) {
-	if _, ok := m.Views[view]; !ok {
-		return nil, nil, fmt.Errorf("unknown view %#v", view)
-	}
-	if m.IsArray() {
-		return m.projectCollection(view)
-	}
-	if m.Type.ToObject() == nil {
-		return m, nil, nil
-	}
-	return m.projectSingle(view)
-}
-
-// DefaultView returns the name of a view that can be used to project the media type.
-// It returns the default view - or if not available the link view - or if not available the first
-// view by alphabetical order.
-func (m *MediaTypeDefinition) DefaultView() string {
-	if _, ok := m.Views["default"]; ok {
-		return "default"
-	}
-	if _, ok := m.Views["link"]; ok {
-		return "link"
-	}
-	views := make([]string, len(m.Views))
-	i := 0
-	for n := range m.Views {
-		views[i] = n
-		i++
-	}
-	sort.Strings(views)
-	return views[0]
-}
-
-func (m *MediaTypeDefinition) projectSingle(view string) (p *MediaTypeDefinition, links *UserTypeDefinition, err error) {
-	v := m.Views[view]
-	canonical := CanonicalIdentifier(m.Identifier)
-	typeName := m.TypeName
-	if view != "default" {
-		typeName += strings.Title(view)
-		canonical += "; view=" + view
-	}
-	var ok bool
-	if p, ok = ProjectedMediaTypes[canonical]; ok {
+// Project creates a MediaTypeDefinition containing the fields defined in the given view.  The
+// resuling media type only defines the default view and its identifier is modified to indicate that
+// it was projected by adding the view as id parameter.  links is a user type of type Object where
+// each key corresponds to a linked media type as defined by the media type "links" attribute.
+func (m *MediaTypeDefinition) Project(view string) (*MediaTypeDefinition, *UserTypeDefinition, error) {
+	canonical := m.projectCanonical(view)
+	if p, ok := ProjectedMediaTypes[canonical]; ok {
+		var links *UserTypeDefinition
 		mLinks := ProjectedMediaTypes[canonical+"; links"]
 		if mLinks != nil {
 			links = mLinks.UserTypeDefinition
 		}
-		return
+		return p, links, nil
 	}
+	if m.IsArray() {
+		return m.projectCollection(view)
+	}
+	return m.projectSingle(view, canonical)
+}
+
+func (m *MediaTypeDefinition) projectSingle(view, canonical string) (p *MediaTypeDefinition, links *UserTypeDefinition, err error) {
+	v, ok := m.Views[view]
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown view %#v", view)
+	}
+	viewObj := v.Type.ToObject()
 
 	// Compute validations - view may not have all attributes
-	viewObj := v.Type.ToObject()
 	var val *dslengine.ValidationDefinition
 	if m.Validation != nil {
 		names := m.Validation.Required
@@ -806,20 +793,22 @@ func (m *MediaTypeDefinition) projectSingle(view string) (p *MediaTypeDefinition
 		val = m.Validation.Dup()
 		val.Required = required
 	}
+
+	// Compute description
 	desc := m.Description
 	if desc == "" {
 		desc = m.TypeName + " media type"
 	}
 	desc += " (" + view + " view)"
+
 	p = &MediaTypeDefinition{
-		Identifier: m.Identifier,
+		Identifier: m.projectIdentifier(view),
 		UserTypeDefinition: &UserTypeDefinition{
-			TypeName: typeName,
+			TypeName: m.projectTypeName(view),
 			AttributeDefinition: &AttributeDefinition{
 				Description: desc,
 				Type:        Dup(v.Type),
 				Validation:  val,
-				Example:     m.Example,
 			},
 		},
 	}
@@ -832,8 +821,9 @@ func (m *MediaTypeDefinition) projectSingle(view string) (p *MediaTypeDefinition
 	ProjectedMediaTypes[canonical] = p
 	projectedObj := p.Type.ToObject()
 	mtObj := m.Type.ToObject()
+	_, hasAttNamedLinks := mtObj["links"]
 	for n := range viewObj {
-		if n == "links" {
+		if n == "links" && !hasAttNamedLinks {
 			linkObj := make(Object)
 			for n, link := range m.Links {
 				linkView := link.View
@@ -871,13 +861,16 @@ func (m *MediaTypeDefinition) projectSingle(view string) (p *MediaTypeDefinition
 						view = at.View
 					}
 					if view == "" {
-						view = mt.DefaultView()
+						view = DefaultView
 					}
 					pr, _, err := mt.Project(view)
 					if err != nil {
 						return nil, nil, fmt.Errorf("view %#v on field %#v cannot be computed: %s", view, n, err)
 					}
 					at.Type = pr
+					// Force example to be generated again
+					// since set of attributes has changed
+					at.Example = nil
 				}
 				projectedObj[n] = at
 			}
@@ -886,7 +879,7 @@ func (m *MediaTypeDefinition) projectSingle(view string) (p *MediaTypeDefinition
 	return
 }
 
-func (m *MediaTypeDefinition) projectCollection(view string) (p *MediaTypeDefinition, links *UserTypeDefinition, err error) {
+func (m *MediaTypeDefinition) projectCollection(view string) (*MediaTypeDefinition, *UserTypeDefinition, error) {
 	// Project the collection element media type
 	e := m.ToArray().ElemType.Type.(*MediaTypeDefinition) // validation checked this cast would work
 	pe, le, err2 := e.Project(view)
@@ -896,8 +889,8 @@ func (m *MediaTypeDefinition) projectCollection(view string) (p *MediaTypeDefini
 
 	// Build the projected collection with the results
 	desc := m.TypeName + " is the media type for an array of " + e.TypeName + " (" + view + " view)"
-	p = &MediaTypeDefinition{
-		Identifier: m.Identifier,
+	p := &MediaTypeDefinition{
+		Identifier: m.projectIdentifier(view),
 		UserTypeDefinition: &UserTypeDefinition{
 			AttributeDefinition: &AttributeDefinition{
 				Description: desc,
@@ -907,17 +900,11 @@ func (m *MediaTypeDefinition) projectCollection(view string) (p *MediaTypeDefini
 			TypeName: pe.TypeName + "Collection",
 		},
 	}
-
-	// Set the collection views with a dup of the element views
-	views := make(map[string]*ViewDefinition, len(pe.Views))
-	for n, v := range pe.Views {
-		views[n] = &ViewDefinition{
-			AttributeDefinition: DupAtt(v.AttributeDefinition),
-			Name:                v.Name,
-			Parent:              p,
-		}
-	}
-	p.Views = views
+	p.Views = map[string]*ViewDefinition{"default": &ViewDefinition{
+		AttributeDefinition: DupAtt(pe.Views["default"].AttributeDefinition),
+		Name:                "default",
+		Parent:              p,
+	}}
 
 	// Run the DSL that was created by the CollectionOf function
 	if !dslengine.Execute(p.DSL(), p) {
@@ -925,6 +912,7 @@ func (m *MediaTypeDefinition) projectCollection(view string) (p *MediaTypeDefini
 	}
 
 	// Build the links user type
+	var links *UserTypeDefinition
 	if le != nil {
 		lTypeName := le.TypeName + "Array"
 		links = &UserTypeDefinition{
@@ -936,7 +924,40 @@ func (m *MediaTypeDefinition) projectCollection(view string) (p *MediaTypeDefini
 		}
 	}
 
-	return
+	return p, links, nil
+}
+
+// projectIdentifier computes the projected media type identifier by adding the "view" param.  We
+// need the projected media type identifier to be different so that looking up projected media types
+// from ProjectedMediaTypes works correctly. It's also good for clients.
+func (m *MediaTypeDefinition) projectIdentifier(view string) string {
+	base, params, err := mime.ParseMediaType(m.Identifier)
+	if err != nil {
+		base = m.Identifier
+	}
+	params["view"] = view
+	return mime.FormatMediaType(base, params)
+}
+
+// projectIdentifier computes the projected canonical media type identifier by adding the "view"
+// param if the view is not the default view.
+func (m *MediaTypeDefinition) projectCanonical(view string) string {
+	cano := CanonicalIdentifier(m.Identifier)
+	base, params, _ := mime.ParseMediaType(cano)
+	if params["view"] != "" {
+		return cano // Already projected
+	}
+	params["view"] = view
+	return mime.FormatMediaType(base, params)
+}
+
+// projectTypeName appends the view name to the media type name if the view name is not "default".
+func (m *MediaTypeDefinition) projectTypeName(view string) string {
+	typeName := m.TypeName
+	if view != "default" {
+		typeName += strings.Title(view)
+	}
+	return typeName
 }
 
 // DataStructure implementation

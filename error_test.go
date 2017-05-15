@@ -16,7 +16,7 @@ var _ = Describe("Error", func() {
 		status = 400
 		detail = "error"
 	)
-	var meta = []map[string]interface{}{{"what": 42}}
+	var meta = map[string]interface{}{"what": 42}
 
 	var gerr *ErrorResponse
 
@@ -27,7 +27,7 @@ var _ = Describe("Error", func() {
 	It("serializes to JSON", func() {
 		b, err := json.Marshal(gerr)
 		Ω(err).ShouldNot(HaveOccurred())
-		Ω(string(b)).Should(Equal(`{"id":"foo","code":"invalid","status":400,"detail":"error","meta":[{"what":42}]}`))
+		Ω(string(b)).Should(Equal(`{"id":"foo","code":"invalid","status":400,"detail":"error","meta":{"what":42}}`))
 	})
 })
 
@@ -185,23 +185,46 @@ var _ = Describe("InvalidPatternError", func() {
 
 var _ = Describe("InvalidRangeError", func() {
 	var valErr error
+	var value interface{}
+
 	ctx := "ctx"
 	target := "target"
-	value := 42
 	min := true
 
 	JustBeforeEach(func() {
 		valErr = InvalidRangeError(ctx, target, value, min)
 	})
 
-	It("creates a http error", func() {
-		Ω(valErr).ShouldNot(BeNil())
-		Ω(valErr).Should(BeAssignableToTypeOf(&ErrorResponse{}))
-		err := valErr.(*ErrorResponse)
-		Ω(err.Detail).Should(ContainSubstring(ctx))
-		Ω(err.Detail).Should(ContainSubstring("greater or equal"))
-		Ω(err.Detail).Should(ContainSubstring(fmt.Sprintf("%#v", value)))
-		Ω(err.Detail).Should(ContainSubstring(target))
+	Context("with an int value", func() {
+		BeforeEach(func() {
+			value = 42
+		})
+
+		It("creates a http error", func() {
+			Ω(valErr).ShouldNot(BeNil())
+			Ω(valErr).Should(BeAssignableToTypeOf(&ErrorResponse{}))
+			err := valErr.(*ErrorResponse)
+			Ω(err.Detail).Should(ContainSubstring(ctx))
+			Ω(err.Detail).Should(ContainSubstring("greater than or equal to"))
+			Ω(err.Detail).Should(ContainSubstring(fmt.Sprintf("%#v", value)))
+			Ω(err.Detail).Should(ContainSubstring(target))
+		})
+	})
+
+	Context("with a float64 value", func() {
+		BeforeEach(func() {
+			value = 42.42
+		})
+
+		It("creates a http error with no value truncation", func() {
+			Ω(valErr).ShouldNot(BeNil())
+			Ω(valErr).Should(BeAssignableToTypeOf(&ErrorResponse{}))
+			err := valErr.(*ErrorResponse)
+			Ω(err.Detail).Should(ContainSubstring(ctx))
+			Ω(err.Detail).Should(ContainSubstring("greater than or equal to"))
+			Ω(err.Detail).Should(ContainSubstring(fmt.Sprintf("%#v", value)))
+			Ω(err.Detail).Should(ContainSubstring(target))
+		})
 	})
 })
 
@@ -230,7 +253,7 @@ var _ = Describe("InvalidLengthError", func() {
 			Ω(valErr).Should(BeAssignableToTypeOf(&ErrorResponse{}))
 			err := valErr.(*ErrorResponse)
 			Ω(err.Detail).Should(ContainSubstring(ctx))
-			Ω(err.Detail).Should(ContainSubstring("greater or equal"))
+			Ω(err.Detail).Should(ContainSubstring("greater than or equal to"))
 			Ω(err.Detail).Should(ContainSubstring(fmt.Sprintf("%#v", value)))
 			Ω(err.Detail).Should(ContainSubstring(target.(string)))
 		})
@@ -247,7 +270,7 @@ var _ = Describe("InvalidLengthError", func() {
 			Ω(valErr).Should(BeAssignableToTypeOf(&ErrorResponse{}))
 			err := valErr.(*ErrorResponse)
 			Ω(err.Detail).Should(ContainSubstring(ctx))
-			Ω(err.Detail).Should(ContainSubstring("greater or equal"))
+			Ω(err.Detail).Should(ContainSubstring("greater than or equal to"))
 			Ω(err.Detail).Should(ContainSubstring(fmt.Sprintf("%#v", value)))
 			Ω(err.Detail).Should(ContainSubstring(fmt.Sprintf("%#v", target)))
 		})
@@ -320,21 +343,19 @@ var _ = Describe("Merge", func() {
 		const detail = "foo"
 		var status = 42
 		var code = "common"
-		var metaValues []map[string]interface{}
 
 		BeforeEach(func() {
-			err = &ErrorResponse{Detail: detail, Status: status, Code: code, Meta: metaValues}
+			err = &ErrorResponse{Detail: detail, Status: status, Code: code}
 		})
 
 		Context("with another Error", func() {
 			const detail2 = "foo2"
 			var status2 = status
 			var code2 = code
-			var metaValues2 []map[string]interface{}
 			var mErr2 *ErrorResponse
 
 			BeforeEach(func() {
-				mErr2 = &ErrorResponse{Detail: detail2, Status: status2, Code: code2, Meta: metaValues2}
+				mErr2 = &ErrorResponse{Detail: detail2, Status: status2, Code: code2}
 				err2 = mErr2
 			})
 
@@ -390,7 +411,7 @@ var _ = Describe("Merge", func() {
 				})
 
 				Context("with other metadata", func() {
-					var metaValues2 = []map[string]interface{}{{"foo": 1}, {"bar": 2}}
+					metaValues2 := map[string]interface{}{"foo": 1, "bar": 2}
 
 					BeforeEach(func() {
 						err.(*ErrorResponse).Meta = nil
@@ -399,15 +420,86 @@ var _ = Describe("Merge", func() {
 
 					It("merges the metadata", func() {
 						Ω(mErr.Meta).Should(HaveLen(len(metaValues2)))
-						for i, val := range metaValues2 {
-							for k, v := range val {
-								Ω(mErr.Meta[i]).Should(HaveKeyWithValue(k, v))
-							}
+						for k, v := range metaValues2 {
+							Ω(mErr.Meta[k]).Should(Equal(v))
 						}
 					})
 				})
 			})
 
+			Context("with target metadata", func() {
+				metaValues := map[string]interface{}{"baz": 3, "qux": 4}
+
+				BeforeEach(func() {
+					mv := make(map[string]interface{}, len(metaValues))
+					for k, v := range metaValues {
+						mv[k] = v
+					}
+					err.(*ErrorResponse).Meta = mv
+				})
+
+				Context("with nil/empty other metadata", func() {
+					BeforeEach(func() {
+						mErr2.Meta = nil
+					})
+
+					It("keeps target metadata if no other metadata", func() {
+						Ω(mErr.Meta).Should(HaveLen(len(metaValues)))
+						for k, v := range metaValues {
+							Ω(mErr.Meta[k]).Should(Equal(v))
+						}
+					})
+				})
+
+				Context("with other metadata", func() {
+					metaValues2 := map[string]interface{}{"foo": 1, "bar": 2}
+
+					BeforeEach(func() {
+						mErr2.Meta = metaValues2
+					})
+
+					It("merges the metadata", func() {
+						Ω(mErr.Meta).Should(HaveLen(len(metaValues) + len(metaValues2)))
+						for k, v := range metaValues {
+							Ω(mErr.Meta[k]).Should(Equal(v))
+						}
+						for k, v := range metaValues2 {
+							Ω(mErr.Meta[k]).Should(Equal(v))
+						}
+					})
+				})
+			})
+
+			Context("with metadata with a common key", func() {
+				const commonKey = "foo"
+
+				var metaValues = map[string]interface{}{commonKey: "bar", "foo2": 44}
+				var metaValues2 = map[string]interface{}{commonKey: 43, "baz": 42}
+
+				BeforeEach(func() {
+					mv := make(map[string]interface{}, len(metaValues))
+					for k, v := range metaValues {
+						mv[k] = v
+					}
+					err.(*ErrorResponse).Meta = mv
+					mErr2.Meta = metaValues2
+				})
+
+				It("merges the metadata", func() {
+					Ω(mErr.Meta).Should(HaveLen(len(metaValues) + len(metaValues2) - 1))
+					for k, v := range metaValues {
+						if k != commonKey {
+							Ω(mErr.Meta[k]).Should(Equal(v))
+						}
+					}
+					for k, v := range metaValues2 {
+						if k != commonKey {
+							Ω(mErr.Meta[k]).Should(Equal(v))
+						}
+					}
+					Ω(mErr.Meta[commonKey]).Should(Equal(metaValues2[commonKey]))
+				})
+			})
 		})
 	})
 
